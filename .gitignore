@@ -1,0 +1,26 @@
+# Build output
+build/
+out/
+
+# External dependencies (JUCE — add as submodule separately if needed)
+External/
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# MSVC
+*.user
+*.suo
+*.aps
+.vs/
+
+# macOS
+.DS_Store
+
+# Temp / editor artifacts
+*.tmp
+
+# Claude Code
+.claude/

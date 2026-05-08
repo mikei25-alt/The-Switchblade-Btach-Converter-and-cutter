@@ -47,8 +47,16 @@ namespace switchblade::ui
         void setPitchClarity (std::optional<float> clarity) noexcept;
         void setSelected (bool shouldBeSelected);
 
+        /** Ctrl+click multi-select — used by "Export Selection" batch export. */
+        void setMultiSelected (bool shouldBeMultiSelected);
+        [[nodiscard]] bool isMultiSelected() const noexcept { return multiSelected_; }
+
         /** Show "ANALYZING…" pulsing overlay when the background job is running. */
         void setLoading (bool isLoading) noexcept;
+
+        /** Reflect the current global normalization setting on this card's waveform.
+            Pass 0 to hide the badge; pass e.g. -3.0f to show "⊕ -3dB". */
+        void setNormDb (float db) noexcept { if (normDb_ == db) return; normDb_ = db; repaint (waveformBounds()); }
 
         /** Set the display path before audio is loaded (for pending-card flow). */
         void setDisplayPath (const std::filesystem::path& p);
@@ -72,21 +80,34 @@ namespace switchblade::ui
         std::function<void (int markerIndex, juce::int64 newSample)> onMarkerMoved;
         std::function<void()> onExtractClicked;
         std::function<void()> onSelected;
+        /** Fired when the user clicks the green play triangle — plays full source. */
+        std::function<void()> onPlayClicked;
+        /** Fired after Ctrl+click toggles multiSelected_ — used to update the
+            "N selected" counter in the top bar. */
+        std::function<void()> onMultiSelectChanged;
+        /** Fired when the user clicks the classification badge and selects a
+            different analysis mode from the dropdown — owner should re-analyse
+            with the new mode. */
+        std::function<void (switchblade::analysis::AnalysisMode)> onModeChangeRequested;
 
         //----- Component ------------------------------------------------------
         void paint (juce::Graphics&) override;
         void resized() override;
-        void mouseDown (const juce::MouseEvent&) override;
-        void mouseDrag (const juce::MouseEvent&) override;
-        void mouseUp   (const juce::MouseEvent&) override;
-        void mouseEnter (const juce::MouseEvent&) override;
-        void mouseExit  (const juce::MouseEvent&) override;
+        void mouseDown        (const juce::MouseEvent&) override;
+        void mouseDrag        (const juce::MouseEvent&) override;
+        void mouseUp          (const juce::MouseEvent&) override;
+        void mouseEnter       (const juce::MouseEvent&) override;
+        void mouseExit        (const juce::MouseEvent&) override;
+        void mouseDoubleClick (const juce::MouseEvent&) override;
+        void mouseWheelMove   (const juce::MouseEvent&,
+                               const juce::MouseWheelDetails&) override;
 
     private:
         void rebuildThumbnail();
         void rebuildMonoCache();
         [[nodiscard]] juce::Rectangle<int>   waveformBounds() const noexcept;
         [[nodiscard]] juce::Rectangle<int>   headerBounds()   const noexcept;
+        [[nodiscard]] juce::Rectangle<int>   playBtnBounds()  const noexcept;
         [[nodiscard]] float xForSample (juce::int64 sample) const noexcept;
         [[nodiscard]] juce::int64 sampleForX (float x) const noexcept;
         [[nodiscard]] int hitTestMarker (juce::Point<float> localPoint) const noexcept;
@@ -109,13 +130,27 @@ namespace switchblade::ui
         std::optional<float>                         pitchHz_;
         std::optional<float>                         pitchClarity_;
 
-        bool  selected_    { false };
-        bool  hovered_     { false };
+        bool  selected_      { false };
+        bool  multiSelected_ { false };  // Ctrl+click export selection
+        bool  hovered_       { false };
         bool  loading_     { false };  // "ANALYZING…" overlay
         float liftPhase_   { 0.0f };   // 0 = resting, 1 = fully lifted
         float entryGlow_   { 0.0f };   // 1 = white-hot arrival, decays to 0
         int   draggingIdx_ { -1 };
         std::filesystem::path displayPath_;  // shown before file_ is set
+        // Badge hit area — set in paintHeader (const, so mutable), read in mouseDown.
+        mutable juce::Rectangle<int> badgeBounds_;
+
+        // Waveform zoom / pan state.
+        // viewStart_ and viewEnd_ are normalised fractions of the total file [0, 1].
+        // 1.0 range = full file; smaller = zoomed in.
+        double viewStart_ { 0.0 };
+        double viewEnd_   { 1.0 };
+        bool   isPanning_    { false };
+        float  panLastX_     { 0.0f };
+
+        // Normalization display: 0 = off, negative = target dBFS level
+        float  normDb_  { 0.0f };
 
         // Cached mono mixdown for zero-cross snapping during drag.
         // Populated lazily on first drag; cleared when file changes.

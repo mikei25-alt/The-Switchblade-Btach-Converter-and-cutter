@@ -44,7 +44,6 @@ namespace switchblade::analysis
         juce::dsp::FFT              fft_;
         juce::dsp::WindowingFunction<float> window_;
         std::vector<float>          fftScratch_;     // 2 * fftSize
-        std::vector<float>          prevMag_;        // fftSize/2
-        std::vector<float>          curMag_;         // fftSize/2
+        std::vector<float>          prevMag_;        // fftSize/2 — updated in-place each hop
     };
 } // namespace switchblade::analysis

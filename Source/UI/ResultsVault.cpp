@@ -30,7 +30,8 @@ namespace switchblade::ui
     void ResultsVault::addSlices (
         AudioFilePtr file,
         const std::vector<switchblade::analysis::Transient>& transients,
-        switchblade::analysis::SourceClass classification)
+        switchblade::analysis::SourceClass classification,
+        juce::String noteName)
     {
         if (! file || transients.empty()) return;
 
@@ -40,15 +41,13 @@ namespace switchblade::ui
         for (std::size_t i = 0; i < transients.size(); ++i)
         {
             const juce::int64 start = transients[i].sampleIndex;
-            // Use energy-decay end so full ADSR tail is preserved.
-            // Slices may overlap — each tile is an independent one-shot.
             const juce::int64 end = (transients[i].naturalEnd > 0)
                 ? transients[i].naturalEnd
                 : ((i + 1 < transients.size())
                     ? transients[i + 1].sampleIndex
                     : totalSamples);
             pending_.push_back ({ file, start, std::min (end, totalSamples),
-                                  classification, nextTileIndex_++ });
+                                  classification, noteName, nextTileIndex_++ });
         }
 
         if (! isTimerRunning())
@@ -66,6 +65,31 @@ namespace switchblade::ui
         allDone_        = false;
         ceremonyPhase_  = 0.0f;
         relayout();
+        repaint();
+    }
+
+    void ResultsVault::forEachSelectedTile (std::function<void (const ResultTile&)> fn) const
+    {
+        if (! fn) return;
+        for (const auto& t : tiles_)
+            if (t && t->isMultiSelected())
+                fn (*t);
+    }
+
+    int ResultsVault::selectedTileCount() const noexcept
+    {
+        int n = 0;
+        for (const auto& t : tiles_)
+            if (t && t->isMultiSelected())
+                ++n;
+        return n;
+    }
+
+    void ResultsVault::setNormMode (bool active)
+    {
+        normMode_ = active;
+        for (auto& t : tiles_)
+            if (t) t->setNormalized (active);
         repaint();
     }
 
@@ -124,7 +148,7 @@ namespace switchblade::ui
         auto tile = std::make_unique<ResultTile> (
             fmt_, cache_,
             ps.file, ps.start, ps.end,
-            ps.classification, ps.index);
+            ps.classification, ps.index, ps.noteName);
 
         tile->onPlay = [this] (auto f, auto s, auto e)
         {
@@ -134,7 +158,12 @@ namespace switchblade::ui
         {
             if (onTileSelected) onTileSelected (std::move (f), s, e);
         };
+        tile->onMultiSelectChanged = [this]
+        {
+            if (onSelectionChanged) onSelectionChanged();
+        };
 
+        tile->setNormalized (normMode_);
         addAndMakeVisible (*tile);
         tile->triggerEntryGlow();
         tiles_.push_back (std::move (tile));

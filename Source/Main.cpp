@@ -5,6 +5,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_opengl/juce_opengl.h>
 
+#include "BinaryData.h"
+
 // =============================================================================
 //  SwitchbladeApp — JUCE application entry point.
 //
@@ -78,6 +80,12 @@ private:
             setContentNonOwned (container_.get(), true);
             centreWithSize (1280, 800);
             setVisible (true);
+
+            // Set taskbar / title-bar icon from the embedded PNG asset.
+            const auto icon = juce::ImageCache::getFromMemory (
+                BinaryData::logo_png, BinaryData::logo_pngSize);
+            if (! icon.isNull())
+                setIcon (icon);
         }
 
         ~MainWindow() override

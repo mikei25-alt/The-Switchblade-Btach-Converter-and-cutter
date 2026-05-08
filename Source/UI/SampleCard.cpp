@@ -4,6 +4,7 @@
 #include "Analysis/ZeroCrossing.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace switchblade::ui
@@ -49,6 +50,9 @@ namespace switchblade::ui
     {
         file_ = std::move (file);
         monoCache_.clear();
+        viewStart_ = 0.0;
+        viewEnd_   = 1.0;
+        isPanning_ = false;
         rebuildThumbnail();
         repaint();
     }
@@ -83,6 +87,16 @@ namespace switchblade::ui
             return;
         selected_ = s;
         repaint();
+    }
+
+    void SampleCard::setMultiSelected (bool s)
+    {
+        if (multiSelected_ == s)
+            return;
+        multiSelected_ = s;
+        repaint();
+        if (onMultiSelectChanged)
+            onMultiSelectChanged();
     }
 
     void SampleCard::setLoading (bool isLoading) noexcept
@@ -137,6 +151,11 @@ namespace switchblade::ui
         return getLocalBounds().withHeight (kHeaderH).reduced (6, 4);
     }
 
+    juce::Rectangle<int> SampleCard::playBtnBounds() const noexcept
+    {
+        return headerBounds().removeFromLeft (22);
+    }
+
     juce::Rectangle<int> SampleCard::waveformBounds() const noexcept
     {
         return getLocalBounds()
@@ -150,9 +169,11 @@ namespace switchblade::ui
         if (! file_ || file_->samples.getNumSamples() <= 0)
             return 0.0f;
         const auto wf = waveformBounds().toFloat();
-        const auto ratio = static_cast<double> (sample)
-                         / static_cast<double> (file_->samples.getNumSamples());
-        return wf.getX() + static_cast<float> (ratio) * wf.getWidth();
+        const double frac   = static_cast<double> (sample)
+                            / static_cast<double> (file_->samples.getNumSamples());
+        const double range  = viewEnd_ - viewStart_;
+        const double vFrac  = (frac - viewStart_) / range;
+        return wf.getX() + static_cast<float> (vFrac) * wf.getWidth();
     }
 
     juce::int64 SampleCard::sampleForX (float x) const noexcept
@@ -160,10 +181,11 @@ namespace switchblade::ui
         if (! file_ || file_->samples.getNumSamples() <= 0)
             return 0;
         const auto wf = waveformBounds().toFloat();
-        const double ratio = juce::jlimit (0.0,
-            1.0, (static_cast<double> (x) - wf.getX()) / wf.getWidth());
+        const double vFrac = (static_cast<double> (x) - wf.getX()) / wf.getWidth();
+        const double frac  = viewStart_ + vFrac * (viewEnd_ - viewStart_);
         return static_cast<juce::int64> (
-            std::llround (ratio * static_cast<double> (file_->samples.getNumSamples())));
+            std::llround (std::clamp (frac, 0.0, 1.0)
+                          * static_cast<double> (file_->samples.getNumSamples())));
     }
 
     int SampleCard::hitTestMarker (juce::Point<float> p) const noexcept
@@ -269,7 +291,7 @@ namespace switchblade::ui
         g.setColour (pal::GlassRim);
         g.drawRoundedRectangle (inner, 8.0f, 1.0f);
 
-        // Selection glow
+        // Preview-focus glow (single selection — cyan)
         if (selected_)
         {
             for (int i = 3; i >= 1; --i)
@@ -282,6 +304,15 @@ namespace switchblade::ui
             }
             g.setColour (pal::NeonCyan);
             g.drawRoundedRectangle (inner, 8.0f, 1.4f);
+        }
+
+        // Ctrl+click multi-select border — 2px NeonGold solid outline
+        if (multiSelected_)
+        {
+            g.setColour (pal::Selection.withAlpha (0.25f));
+            g.drawRoundedRectangle (inner.expanded (2.0f), 9.5f, 4.0f);
+            g.setColour (pal::Selection);
+            g.drawRoundedRectangle (inner, 8.0f, 2.0f);
         }
 
         // ----- Cooling-glow entry ring -----------------------------------
@@ -314,7 +345,7 @@ namespace switchblade::ui
                 static_cast<float> (juce::Time::getMillisecondCounterHiRes() * 0.004));
             g.setColour (pal::NeonCyan.withAlpha (pulse));
             g.setFont (juce::Font (juce::FontOptions { 15.0f }).boldened());
-            g.drawFittedText ("ANALYZING\xe2\x80\xa6",
+            g.drawFittedText (juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6")),
                               inner.toNearestInt(),
                               juce::Justification::centred, 1);
         }
@@ -337,9 +368,42 @@ namespace switchblade::ui
 
         const auto name = juce::String (sourcePath.filename().string());
 
-        // Classification badge (pill) on the right — shows note name for Melodic
-        // Only show the note name badge if pitch clarity is high enough (> 0.5)
-        // indicating a true fundamental frequency, not noisy transients.
+        // ── Green play triangle (left edge) ───────────────────────────────────
+        // Fixed 22px slot so the triangle is clearly visible regardless of card height.
+        const auto playR = r.removeFromLeft (22);
+        r.removeFromLeft (3);   // gap before filename
+
+        if (file_)
+        {
+            const auto  pf  = playR.toFloat();
+            const float cx  = pf.getCentreX();
+            const float cy  = pf.getCentreY();
+            const float h   = pf.getHeight() * 0.70f;
+            const float w   = h * 0.866f;
+
+            // Background circle glow
+            g.setColour (pal::NeonMint.withAlpha (hovered_ ? 0.30f : 0.16f));
+            g.fillEllipse (pf.reduced (1.0f));
+
+            // Filled right-pointing triangle
+            juce::Path tri;
+            tri.addTriangle (cx - w * 0.38f, cy - h * 0.50f,
+                             cx - w * 0.38f, cy + h * 0.50f,
+                             cx + w * 0.62f, cy);
+            g.setColour (hovered_ ? pal::ChromeSpec : pal::NeonMint);
+            g.fillPath (tri);
+
+            // Thin circle border
+            g.setColour (pal::NeonMint.withAlpha (0.55f));
+            g.drawEllipse (pf.reduced (1.0f), 1.0f);
+        }
+        else
+        {
+            g.setColour (pal::TextDisabled);
+            g.drawEllipse (playR.toFloat().reduced (2.0f), 1.0f);
+        }
+
+        // ── Classification badge (right edge) ────────────────────────────────
         using C = switchblade::analysis::SourceClass;
         juce::String badgeText = classificationTag();
         if (classification_ == C::Melodic && pitchHz_.has_value()
@@ -352,15 +416,19 @@ namespace switchblade::ui
 
         const int badgeW = 96;
         const auto badge = r.removeFromRight (badgeW).reduced (0, 2);
-        g.setColour (classificationColour().withAlpha (0.25f));
+        badgeBounds_ = badge;   // cache for mouseDown hit-test
+
+        // Subtle hover highlight so user sees it's clickable
+        const bool badgeHovered = hovered_ && badge.contains (getMouseXYRelative());
+        g.setColour (classificationColour().withAlpha (badgeHovered ? 0.45f : 0.25f));
         g.fillRoundedRectangle (badge.toFloat(), 8.0f);
         g.setColour (classificationColour());
-        g.drawRoundedRectangle (badge.toFloat(), 8.0f, 1.0f);
+        g.drawRoundedRectangle (badge.toFloat(), 8.0f, badgeHovered ? 1.8f : 1.0f);
         g.setFont (juce::Font (juce::FontOptions { 11.0f }).boldened());
         g.drawFittedText (badgeText, badge,
                           juce::Justification::centred, 1);
 
-        // Filename
+        // ── Filename ─────────────────────────────────────────────────────────
         g.setColour (pal::TextPrimary);
         g.setFont (juce::Font (juce::FontOptions { 13.0f }).boldened());
         g.drawFittedText (name, r.reduced (2, 0),
@@ -378,15 +446,67 @@ namespace switchblade::ui
         g.setColour (pal::ChromeMid.withAlpha (0.5f));
         g.drawRoundedRectangle (r.toFloat(), 4.0f, 1.0f);
 
-        // Fake-bloom: three increasing-alpha passes at identical bounds. Cheap,
-        // CPU-only. The GL bloom pass in NeonBloomShader composes on top.
-        const double totalS = file_->durationSeconds();
+        const double totalS  = file_->durationSeconds();
+        const double startS  = viewStart_ * totalS;
+        const double endS    = viewEnd_   * totalS;
+
+        // Fake-bloom: three increasing-alpha passes. Draws only the visible range.
         g.setColour (pal::NeonCyan.withAlpha (0.18f));
-        thumbnail_->drawChannels (g, r.expanded (0, 1), 0.0, totalS, 1.0f);
+        thumbnail_->drawChannels (g, r.expanded (0, 1), startS, endS, 1.0f);
         g.setColour (pal::NeonCyan.withAlpha (0.40f));
-        thumbnail_->drawChannels (g, r, 0.0, totalS, 1.0f);
+        thumbnail_->drawChannels (g, r, startS, endS, 1.0f);
         g.setColour (pal::NeonCyan);
-        thumbnail_->drawChannels (g, r, 0.0, totalS, 1.0f);
+        thumbnail_->drawChannels (g, r, startS, endS, 1.0f);
+
+        // ── Normalization pill badge (bottom-left of waveform) ────────────────
+        if (normDb_ < 0.0f)
+        {
+            const juce::String normStr =
+                juce::String (juce::CharPointer_UTF8 ("\xe2\x8a\x95"))   // ⊕
+                + " " + juce::String (static_cast<int> (normDb_)) + "dB";
+
+            g.setFont (juce::Font (juce::FontOptions { 10.0f }).boldened());
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (g.getCurrentFont(), normStr, 0.0f, 0.0f);
+            const float tw = ga.getBoundingBox (0, -1, true).getWidth();
+            const auto pillR = juce::Rectangle<float> (
+                static_cast<float> (r.getX()) + 3.0f,
+                static_cast<float> (r.getBottom()) - 17.0f,
+                tw + 8.0f, 13.0f);
+            g.setColour (pal::NeonGold.withAlpha (0.22f));
+            g.fillRoundedRectangle (pillR, 3.0f);
+            g.setColour (pal::NeonGold);
+            g.drawRoundedRectangle (pillR, 3.0f, 0.8f);
+            g.drawText (normStr, pillR.toNearestInt(), juce::Justification::centred, false);
+        }
+
+        // ── Zoom overlay ──────────────────────────────────────────────────────
+        const double range = viewEnd_ - viewStart_;
+        if (range < 0.999)
+        {
+            const float zoom = static_cast<float> (1.0 / range);
+
+            // Zoom badge — top-right corner
+            const juce::String zoomStr =
+                (zoom < 10.0f ? juce::String (zoom, 1) : juce::String (static_cast<int> (zoom)))
+                + juce::String (juce::CharPointer_UTF8 ("\xc3\x97"));  // UTF-8 "×"
+
+            const auto badgeR = r.removeFromRight (38).removeFromTop (16).reduced (2, 1);
+            g.setColour (pal::ChromeVoid.withAlpha (0.72f));
+            g.fillRoundedRectangle (badgeR.toFloat(), 3.0f);
+            g.setColour (pal::NeonGold);
+            g.setFont (juce::Font (juce::FontOptions { 10.0f }).boldened());
+            g.drawFittedText (zoomStr, badgeR, juce::Justification::centred, 1);
+
+            // Scroll-position bar — bottom of waveform
+            const auto scrollR = r.removeFromBottom (3).toFloat();
+            g.setColour (pal::ChromeMid.withAlpha (0.40f));
+            g.fillRect (scrollR);
+            g.setColour (pal::NeonGold.withAlpha (0.70f));
+            const float hx = scrollR.getX() + static_cast<float> (viewStart_) * scrollR.getWidth();
+            const float hw = static_cast<float> (range) * scrollR.getWidth();
+            g.fillRect (hx, scrollR.getY(), std::max (2.0f, hw), scrollR.getHeight());
+        }
     }
 
     void SampleCard::paintMarkers (juce::Graphics& g, juce::Rectangle<int> r) const
@@ -396,9 +516,15 @@ namespace switchblade::ui
 
         const auto top    = static_cast<float> (r.getY());
         const auto bottom = static_cast<float> (r.getBottom());
+        const double totalS = static_cast<double> (file_->samples.getNumSamples());
 
         for (std::size_t i = 0; i < transients_.size(); ++i)
         {
+            // Skip markers that are outside the visible range (with 1px margin)
+            const double frac = static_cast<double> (transients_[i].sampleIndex) / totalS;
+            if (frac < viewStart_ - 0.001 || frac > viewEnd_ + 0.001)
+                continue;
+
             const float x = xForSample (transients_[i].sampleIndex);
             const bool  active = (static_cast<int> (i) == draggingIdx_);
 
@@ -421,21 +547,95 @@ namespace switchblade::ui
     void SampleCard::mouseDown (const juce::MouseEvent& e)
     {
         const auto p = e.position;
+
+        // Play button takes priority — fires before marker / selection logic
+        if (file_ && playBtnBounds().toFloat().contains (p))
+        {
+            if (onPlayClicked)
+                onPlayClicked();
+            return;
+        }
+
+        // Ctrl+click always toggles multi-select — checked BEFORE hitTestMarker
+        // so clicking near a marker with Ctrl held selects rather than dragging.
+        if (e.mods.isCtrlDown())
+        {
+            setMultiSelected (! multiSelected_);
+            return;
+        }
+
+        // Classification badge → algorithm-override dropdown
+        if (badgeBounds_.contains (e.getPosition()))
+        {
+            using M = switchblade::analysis::AnalysisMode;
+            juce::PopupMenu menu;
+            menu.addItem (1, "Auto");
+            menu.addItem (2, "Percussive");
+            menu.addItem (3, "Melodic");
+            menu.addItem (4, "Texture");
+
+            const auto screenArea = localAreaToGlobal (badgeBounds_);
+            menu.showMenuAsync (
+                juce::PopupMenu::Options{}
+                    .withTargetComponent (this)
+                    .withTargetScreenArea (screenArea),
+                [this] (int result)
+                {
+                    if (result <= 0 || ! onModeChangeRequested) return;
+                    constexpr std::array<M, 4> kModes { M::Auto, M::Percussive,
+                                                        M::Melodic, M::Texture };
+                    onModeChangeRequested (kModes[static_cast<std::size_t> (result - 1)]);
+                });
+            return;
+        }
+
         const int hit = hitTestMarker (p);
+
         if (hit >= 0)
         {
             draggingIdx_ = hit;
-            rebuildMonoCache();    // only cost when first needed
+            rebuildMonoCache();
             repaint();
         }
-        else if (onSelected)
+        else
         {
-            onSelected();
+            // If zoomed, drag on the waveform background pans the view
+            const bool zoomed = (viewEnd_ - viewStart_) < 0.999;
+            if (zoomed && waveformBounds().toFloat().contains (p))
+            {
+                isPanning_ = true;
+                panLastX_  = p.x;
+                // Don't fire onSelected so the card stays highlighted
+            }
+            else
+            {
+                if (onSelected)
+                    onSelected();
+            }
         }
     }
 
     void SampleCard::mouseDrag (const juce::MouseEvent& e)
     {
+        // ── Pan (waveform background drag when zoomed) ─────────────────────────
+        if (isPanning_ && draggingIdx_ < 0)
+        {
+            const auto wf = waveformBounds().toFloat();
+            if (wf.getWidth() > 0.0f)
+            {
+                const double delta = static_cast<double> (panLastX_ - e.position.x)
+                                   / wf.getWidth()
+                                   * (viewEnd_ - viewStart_);
+                panLastX_ = e.position.x;
+
+                const double range = viewEnd_ - viewStart_;
+                viewStart_ = std::clamp (viewStart_ + delta, 0.0, 1.0 - range);
+                viewEnd_   = viewStart_ + range;
+                repaint();
+            }
+            return;
+        }
+
         if (draggingIdx_ < 0 || ! file_
             || draggingIdx_ >= static_cast<int> (transients_.size()))
             return;
@@ -462,6 +662,8 @@ namespace switchblade::ui
 
     void SampleCard::mouseUp (const juce::MouseEvent&)
     {
+        isPanning_ = false;
+
         if (draggingIdx_ >= 0
             && draggingIdx_ < static_cast<int> (transients_.size()))
         {
@@ -481,6 +683,47 @@ namespace switchblade::ui
     void SampleCard::mouseExit (const juce::MouseEvent&)
     {
         hovered_ = false;
+    }
+
+    void SampleCard::mouseDoubleClick (const juce::MouseEvent& e)
+    {
+        // Double-click on waveform area resets zoom to full view
+        if (waveformBounds().toFloat().contains (e.position))
+        {
+            viewStart_ = 0.0;
+            viewEnd_   = 1.0;
+            isPanning_ = false;
+            repaint();
+        }
+    }
+
+    void SampleCard::mouseWheelMove (const juce::MouseEvent& e,
+                                     const juce::MouseWheelDetails& wheel)
+    {
+        if (! file_ || file_->samples.getNumSamples() <= 0)
+            return;
+
+        const auto wf = waveformBounds().toFloat();
+        if (! wf.contains (e.position))
+            return;
+
+        const double oldRange = viewEnd_ - viewStart_;
+
+        // Zoom in on scroll-up, out on scroll-down. Factor ≈ 25 % per tick.
+        const double factor   = (wheel.deltaY > 0.0f) ? 0.75 : 1.33;
+        const double minRange = std::max (1.0 / static_cast<double> (
+                                    file_->samples.getNumSamples()), 0.001);
+        const double newRange = std::clamp (oldRange * factor, minRange, 1.0);
+
+        // Keep the position under the cursor fixed while zooming
+        const double cursorFrac = viewStart_
+            + (static_cast<double> (e.position.x - wf.getX()) / wf.getWidth())
+              * oldRange;
+
+        viewStart_ = std::clamp (cursorFrac - newRange * 0.5, 0.0, 1.0 - newRange);
+        viewEnd_   = viewStart_ + newRange;
+
+        repaint();
     }
 
     //==========================================================================

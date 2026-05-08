@@ -32,7 +32,8 @@ namespace switchblade::ui
                     juce::int64 startSample,
                     juce::int64 endSample,
                     switchblade::analysis::SourceClass classification,
-                    int sliceIndex);
+                    int sliceIndex,
+                    juce::String noteName = {});
         ~ResultTile() override;
 
         ResultTile (const ResultTile&) = delete;
@@ -44,9 +45,23 @@ namespace switchblade::ui
         [[nodiscard]] AudioFilePtr  file()        const noexcept { return file_; }
         [[nodiscard]] juce::int64   startSample() const noexcept { return startSample_; }
         [[nodiscard]] juce::int64   endSample()   const noexcept { return endSample_; }
+        [[nodiscard]] switchblade::analysis::SourceClass classification() const noexcept { return classification_; }
+        [[nodiscard]] int           sliceIndex()  const noexcept { return sliceIndex_; }
+        [[nodiscard]] const juce::String& noteName() const noexcept { return noteName_; }
+
+        /** Ctrl+click multi-select for "Export Selection" batch export. */
+        void setMultiSelected (bool s);
+        [[nodiscard]] bool isMultiSelected() const noexcept { return multiSelected_; }
+
+        /** Show/hide the gold "N" normalization badge. */
+        void setNormalized (bool n) noexcept { if (normalized_ == n) return; normalized_ = n; repaint(); }
+        [[nodiscard]] bool isNormalized() const noexcept { return normalized_; }
 
         std::function<void (AudioFilePtr, juce::int64, juce::int64)> onPlay;
         std::function<void (AudioFilePtr, juce::int64, juce::int64)> onSelected;
+        /** Fired after Ctrl+click toggles multiSelected_ — used by the vault
+            to bubble up a refresh of the top-bar "N selected" counter. */
+        std::function<void()> onMultiSelectChanged;
 
         //----- Component -------------------------------------------------------
         void paint     (juce::Graphics&) override;
@@ -69,7 +84,10 @@ namespace switchblade::ui
         switchblade::analysis::SourceClass   classification_;
         int                                  sliceIndex_;
 
-        float entryGlow_ { 0.0f };   // 1 = white-hot, decays to 0 over ~1.2s
+        juce::String                         noteName_;    // e.g. "A4" — empty for non-melodic
+        bool  multiSelected_ { false };
+        bool  normalized_    { false };   // show gold "N" badge when norm export is active
+        float entryGlow_     { 0.0f };   // 1 = white-hot, decays to 0 over ~1.2s
 
         juce::VBlankAttachment vblank_;
 

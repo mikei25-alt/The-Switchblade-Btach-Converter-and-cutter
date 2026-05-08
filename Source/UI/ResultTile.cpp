@@ -13,7 +13,8 @@ namespace switchblade::ui
                             juce::int64 startSample,
                             juce::int64 endSample,
                             switchblade::analysis::SourceClass classification,
-                            int sliceIndex)
+                            int sliceIndex,
+                            juce::String noteName)
         : fmt_           (fmt)
         , cache_         (cache)
         , file_          (std::move (file))
@@ -21,6 +22,7 @@ namespace switchblade::ui
         , endSample_     (endSample)
         , classification_(classification)
         , sliceIndex_    (sliceIndex)
+        , noteName_      (std::move (noteName))
         , vblank_        (this, [this] { onVBlank(); })
     {
         thumbnail_ = std::make_unique<juce::AudioThumbnail> (64, fmt_, cache_);
@@ -36,6 +38,15 @@ namespace switchblade::ui
     {
         entryGlow_ = 1.0f;
         repaint();
+    }
+
+    void ResultTile::setMultiSelected (bool s)
+    {
+        if (multiSelected_ == s) return;
+        multiSelected_ = s;
+        repaint();
+        if (onMultiSelectChanged)
+            onMultiSelectChanged();
     }
 
     //==========================================================================
@@ -113,38 +124,56 @@ namespace switchblade::ui
             g.fillRect (waveArea);
         }
 
-        // Info strip
+        // Normalization badge — gold "N" pill, top-left of waveform area
+        if (normalized_)
+        {
+            const auto normR = juce::Rectangle<float> (5.0f, 5.0f, 18.0f, 13.0f);
+            g.setColour (pal::NeonGold.withAlpha (0.25f));
+            g.fillRoundedRectangle (normR, 3.0f);
+            g.setColour (pal::NeonGold);
+            g.drawRoundedRectangle (normR, 3.0f, 0.8f);
+            g.setFont (juce::Font (juce::FontOptions{}.withHeight (9.0f).withStyle ("Bold")));
+            g.drawText ("N", normR.toNearestInt(), juce::Justification::centred, false);
+        }
+
+        // Info strip — layout: [Filename] | [Note] | [Length]
         auto infoArea = juce::Rectangle<float> (
             4.0f, b.getHeight() - 24.0f,
             b.getWidth() - 8.0f, 20.0f);
 
-        const auto smallFont = juce::Font (juce::FontOptions{}.withHeight (11.0f));
-        const auto tinyFont  = juce::Font (juce::FontOptions{}.withHeight (10.0f));
+        const auto tinyFont = juce::Font (juce::FontOptions{}.withHeight (10.0f));
+        g.setFont (tinyFont);
 
-        // Index
-        g.setFont (smallFont);
+        // Duration — right-aligned, fixed slot
+        const juce::String dur = durationStr();
+        {
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (tinyFont, dur, 0.0f, 0.0f);
+            const float durW = ga.getBoundingBox (0, -1, true).getWidth() + 2.0f;
+            const auto durBox = infoArea.removeFromRight (durW);
+            g.setColour (pal::TextSecondary);
+            g.drawText (dur, durBox.toNearestInt(), juce::Justification::centredRight, false);
+        }
+
+        // Note badge (melodic only) — right of filename, left of duration
+        if (noteName_.isNotEmpty())
+        {
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (tinyFont, noteName_, 0.0f, 0.0f);
+            const float nw = ga.getBoundingBox (0, -1, true).getWidth() + 6.0f;
+            const auto noteBox = infoArea.removeFromRight (nw + 2.0f);
+            g.setColour (classColour().withAlpha (0.20f));
+            g.fillRoundedRectangle (noteBox.reduced (1.0f, 2.0f), 2.0f);
+            g.setColour (classColour());
+            g.drawText (noteName_, noteBox.toNearestInt(), juce::Justification::centred, false);
+        }
+
+        // Filename stem — left-aligned, remaining space
+        const juce::String stem = file_
+            ? juce::File (juce::String (file_->path.string())).getFileNameWithoutExtension()
+            : juce::String (sliceIndex_).paddedLeft ('0', 3);
         g.setColour (pal::TextPrimary);
-        const juce::String idxLabel = juce::String (sliceIndex_).paddedLeft ('0', 3);
-        g.drawText (idxLabel, infoArea.removeFromLeft (26.0f).toNearestInt(),
-                    juce::Justification::centredLeft, false);
-
-        // Classification badge
-        g.setFont (tinyFont);
-        const juce::String tag = classTag();
-        juce::GlyphArrangement ga;
-        ga.addLineOfText (tinyFont, tag, 0.0f, 0.0f);
-        const float tagW = ga.getBoundingBox (0, -1, true).getWidth() + 8.0f;
-        const auto  tagBox = infoArea.removeFromLeft (tagW + 2.0f);
-        g.setColour (classColour().withAlpha (0.20f));
-        g.fillRoundedRectangle (tagBox, 2.0f);
-        g.setColour (classColour());
-        g.drawText (tag, tagBox.toNearestInt(), juce::Justification::centred, false);
-
-        // Duration (right-aligned)
-        g.setFont (tinyFont);
-        g.setColour (pal::TextSecondary);
-        g.drawText (durationStr(), infoArea.toNearestInt(),
-                    juce::Justification::centredRight, false);
+        g.drawText (stem, infoArea.toNearestInt(), juce::Justification::centredLeft, true);
 
         // Entry glow overlay — white-hot → NeonCyan
         if (entryGlow_ > 0.0f)
@@ -159,10 +188,27 @@ namespace switchblade::ui
             g.setColour (pal::NeonCyan.withAlpha (entryGlow_ * 0.8f));
             g.drawRoundedRectangle (br, 2.5f, 1.0f);
         }
+
+        // Ctrl+click multi-select — 2px NeonGold border on top of everything
+        if (multiSelected_)
+        {
+            g.setColour (pal::Selection.withAlpha (0.30f));
+            g.drawRoundedRectangle (br.expanded (1.0f), 3.0f, 3.0f);
+            g.setColour (pal::Selection);
+            g.drawRoundedRectangle (br, 2.5f, 2.0f);
+        }
     }
 
     void ResultTile::mouseDown (const juce::MouseEvent& e)
     {
+        // Ctrl+click toggles multi-select for "Export Selection" — checked first
+        // so Ctrl+click never fires playback or selection callbacks.
+        if (e.mods.isCtrlDown())
+        {
+            setMultiSelected (! multiSelected_);
+            return;
+        }
+
         if (e.getNumberOfClicks() >= 2)
         {
             if (onSelected) onSelected (file_, startSample_, endSample_);

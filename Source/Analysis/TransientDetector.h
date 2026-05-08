@@ -38,7 +38,7 @@ namespace switchblade::analysis
         {
             SpectralFlux::Config       spectral       {};
             AdaptiveThreshold::Params  threshold      {};
-            float                      minSpacingMs   { 100.0f }; // refractory period — no two onsets within 100ms
+            float                      minSpacingMs   { 200.0f }; // refractory period — no two onsets within 200ms; merges scratches into solid hits
             float                      zeroSnapMs     { 5.0f };   // ± search radius
             float                      sensitivity    { 0.7f };   // 0.5 = strict, 2.0 = loose — lower for fewer false positives
         };

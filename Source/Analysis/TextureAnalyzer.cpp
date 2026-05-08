@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <vector>
 
 namespace switchblade::analysis
 {
@@ -30,6 +31,45 @@ namespace switchblade::analysis
             var += (v - mean) * (v - mean);
         return std::sqrt (var / n);
     }
+
+    // Ring-buffer sliding variance: O(1) push, no erase/shift.
+    // Replaces the std::vector::erase(begin()) approach that was O(window) per frame.
+    class RingVariance
+    {
+    public:
+        explicit RingVariance (int capacity) noexcept
+            : cap_ (capacity), buf_ (static_cast<std::size_t> (capacity), 0.0f) {}
+
+        float push (float x) noexcept
+        {
+            if (count_ == cap_)
+            {
+                const float old = buf_[static_cast<std::size_t> (head_)];
+                sum_   -= old;
+                sumSq_ -= old * old;
+                --count_;
+            }
+            buf_[static_cast<std::size_t> (head_)] = x;
+            head_ = (head_ + 1) % cap_;
+            sum_   += x;
+            sumSq_ += x * x;
+            ++count_;
+            if (count_ < 2) return 0.0f;
+            const float n    = static_cast<float> (count_);
+            const float mean = sum_ / n;
+            return std::sqrt (std::max (0.0f, sumSq_ / n - mean * mean));
+        }
+
+        void reset() noexcept { head_ = count_ = 0; sum_ = sumSq_ = 0.0f; }
+
+    private:
+        int   cap_;
+        std::vector<float> buf_;
+        int   head_  = 0;
+        int   count_ = 0;
+        float sum_   = 0.0f;
+        float sumSq_ = 0.0f;
+    };
 
     std::vector<Transient> TextureAnalyzer::analyze (const AudioFile& file) const
     {
@@ -104,36 +144,23 @@ namespace switchblade::analysis
             std::round (params_.stabilityWindowSec * sr
                        / static_cast<double> (hop))));
 
-        // std::vector used as a ring-buffer (not deque) so .data() gives a
-        // contiguous span. Window is small (~26 frames) so O(n) erase is fine.
-        auto slidingStdDev = [&] (std::size_t f,
-                                  std::vector<float>& win) -> float
-        {
-            win.push_back (centVec[f]);
-            if (static_cast<int> (win.size()) > stabilityWinFrames)
-                win.erase (win.begin());
-            return windowedStdDev (
-                std::span<const float> (win.data(), win.size()));
-        };
-
         // Reference scale: max centroid std-dev across the whole file.
+        // RingVariance gives O(1) per frame instead of O(window) with erase().
         float maxStdDev = 1.0f;
         {
-            std::vector<float> win;
-            win.reserve (static_cast<std::size_t> (stabilityWinFrames));
+            RingVariance rv (stabilityWinFrames);
             for (std::size_t f = 0; f < numFrames; ++f)
-                maxStdDev = std::max (maxStdDev, slidingStdDev (f, win));
+                maxStdDev = std::max (maxStdDev, rv.push (centVec[f]));
         }
 
         std::vector<float> stabilityVec (numFrames);
         {
-            std::vector<float> win;
-            win.reserve (static_cast<std::size_t> (stabilityWinFrames));
+            const float effThreshold = params_.stabilityThreshold
+                                     / std::max (0.1f, params_.sensitivity);
+            RingVariance rv (stabilityWinFrames);
             for (std::size_t f = 0; f < numFrames; ++f)
             {
-                const float sd = slidingStdDev (f, win);
-                const float effThreshold = params_.stabilityThreshold
-                                         / std::max (0.1f, params_.sensitivity);
+                const float sd = rv.push (centVec[f]);
                 stabilityVec[f] = 1.0f - std::min (1.0f, sd / maxStdDev / effThreshold);
             }
         }

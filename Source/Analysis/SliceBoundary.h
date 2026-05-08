@@ -123,4 +123,52 @@ namespace switchblade::analysis
                 std::min (wEnd * winSize, totalS));
         }
     }
+
+    //==========================================================================
+    //  finalizeSliceBoundaries
+    //
+    //  Recompute slice ends from scratch given a list of transients whose
+    //  sampleIndex values may have been edited (e.g. by the user dragging a
+    //  marker on a SampleCard). Mirrors the rules applied at analysis time:
+    //    1. Sort transients by sampleIndex (drags can reorder them).
+    //    2. Reset naturalEnd to 0 and re-run computeNaturalEnds at -35 dB.
+    //    3. Cap each slice at the next onset minus a 20 ms gap.
+    //    4. Hard-cap each slice at 1.5 s.
+    //  Used by MainContainer when committing manual marker positions on the
+    //  message thread, so it must be cheap enough for interactive use.
+    //==========================================================================
+    inline void finalizeSliceBoundaries (
+        const AudioFile&        file,
+        std::vector<Transient>& transients)
+    {
+        if (transients.empty() || ! file.isValid())
+            return;
+
+        std::sort (transients.begin(), transients.end(),
+            [] (const auto& a, const auto& b) { return a.sampleIndex < b.sampleIndex; });
+
+        for (auto& t : transients) t.naturalEnd = 0;
+
+        computeNaturalEnds (file, transients, -50.0f);
+
+        const std::int64_t total    = file.samples.getNumSamples();
+        const std::int64_t maxSlice = static_cast<std::int64_t> (1.5  * file.sampleRate);
+        const std::int64_t gap      = static_cast<std::int64_t> (0.020 * file.sampleRate);
+
+        for (std::size_t i = 0; i < transients.size(); ++i)
+        {
+            std::int64_t end = (transients[i].naturalEnd > 0)
+                ? transients[i].naturalEnd : total;
+
+            if (i + 1 < transients.size())
+            {
+                const std::int64_t cap = transients[i + 1].sampleIndex - gap;
+                if (cap > transients[i].sampleIndex && end > cap)
+                    end = cap;
+            }
+
+            end = std::min (end, transients[i].sampleIndex + maxSlice);
+            transients[i].naturalEnd = std::min (end, total);
+        }
+    }
 } // namespace switchblade::analysis

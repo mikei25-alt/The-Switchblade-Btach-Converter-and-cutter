@@ -34,6 +34,97 @@ namespace switchblade::ui
     };
 
     //==========================================================================
+    //  EllipsisLabel — single-line label that truncates with "…" when narrower
+    //  than its full text. Hovering reveals the full string via tooltip. Used
+    //  for the top-bar status so it never overruns the SWITCHBLADE wordmark.
+    //==========================================================================
+    class EllipsisLabel final : public juce::Component,
+                                public juce::SettableTooltipClient
+    {
+    public:
+        EllipsisLabel() = default;
+
+        void setText (const juce::String& s)
+        {
+            full_ = s;
+            setTooltip (full_);
+            repaint();
+        }
+
+        void setColour (juce::Colour c)              { colour_ = c; repaint(); }
+        void setFont   (juce::Font f)                { font_   = std::move (f); repaint(); }
+        void setJustification (juce::Justification j){ just_   = j; repaint(); }
+
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (colour_);
+            g.setFont (font_);
+
+            const int w = getWidth();
+            const int h = getHeight();
+            if (w <= 0 || h <= 0 || full_.isEmpty()) return;
+
+            auto measure = [this] (const juce::String& s) -> float
+            {
+                juce::GlyphArrangement ga;
+                ga.addLineOfText (font_, s, 0.0f, 0.0f);
+                return ga.getBoundingBox (0, -1, true).getWidth();
+            };
+
+            if (measure (full_) <= static_cast<float> (w))
+            {
+                g.drawText (full_, 0, 0, w, h, just_, false);
+                return;
+            }
+
+            // Binary-truncate from the right until "string…" fits.
+            const juce::String ell = juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa6"));
+            int lo = 0, hi = full_.length();
+            while (lo < hi)
+            {
+                const int mid = (lo + hi + 1) / 2;
+                const auto candidate = full_.substring (0, mid) + ell;
+                if (measure (candidate) <= static_cast<float> (w))
+                    lo = mid;
+                else
+                    hi = mid - 1;
+            }
+            g.drawText (full_.substring (0, lo) + ell, 0, 0, w, h, just_, false);
+        }
+
+    private:
+        juce::String        full_;
+        juce::Colour        colour_ { juce::Colours::white };
+        juce::Font          font_   { juce::FontOptions { 13.0f } };
+        juce::Justification just_   { juce::Justification::centredLeft };
+
+        JUCE_LEAK_DETECTOR (EllipsisLabel)
+    };
+
+    //==========================================================================
+    //  RightClickButton — TextButton that also fires a callback on right-click.
+    //  Used for Produce / Export Selection so a right-click opens the
+    //  normalization level picker without adding any visible controls.
+    //==========================================================================
+    class RightClickButton final : public juce::TextButton
+    {
+    public:
+        using juce::TextButton::TextButton;
+        std::function<void()> onRightClick;
+
+    protected:
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isRightButtonDown())
+            {
+                if (onRightClick) onRightClick();
+                return;
+            }
+            juce::TextButton::mouseDown (e);
+        }
+    };
+
+    //==========================================================================
     //  CardListComponent — inner content Component for the Viewport.
     //  Stretches vertically as cards are added; horizontal layout is fixed.
     //==========================================================================
@@ -113,9 +204,13 @@ namespace switchblade::ui
         juce::ComboBox     modeCombo_;
         juce::Slider       sensitivitySlider_;
         juce::Label        sensitivityLabel_;
-        juce::TextButton   extractAllBtn_  { "Extract All" };
-        juce::TextButton   produceBtn_     { "Produce" };
-        juce::Label        statusLabel_;
+        juce::TextButton   extractAllBtn_      { "Extract All" };
+        RightClickButton   produceBtn_         { "Produce" };
+        RightClickButton   exportSelectionBtn_ { "Export Selection" };
+        float              normTargetDb_       { 0.0f };  // 0 = off, negative = target dBFS
+        juce::Label        selectionCountLabel_;   // "N selected" — live count
+        EllipsisLabel      statusLabel_;
+        juce::TooltipWindow tooltipWindow_ { this, 600 };
 
         //----- Card list ------------------------------------------------------
         juce::Viewport                           cardViewport_;
@@ -144,12 +239,20 @@ namespace switchblade::ui
         void onAnalysisCompleted (switchblade::analysis::AnalysisResult result);
         void onAllAnalysisComplete();
         void selectCard (SampleCard* card);
+        void reAnalyzeCard (SampleCard* card, switchblade::analysis::AnalysisMode mode);
+        void setNormTarget (float db);     // db: 0=off, -1/-3/-6 = target level
+        void updateNormLabel() noexcept;   // refreshes button text + card badges
         void renderAndExportCard (SampleCard& card);
         void extractAll();
         void produceAllSlices();
         void renderSliceToWav (const switchblade::analysis::AudioFile& file,
                                juce::int64 start, juce::int64 end,
-                               const juce::File& outFile) const;
+                               const juce::File& outFile,
+                               std::optional<float> pitchHz = {}) const;
+        void exportSelection();
+        void updateSelectionCount();
+        void rebuildVaultFromCards();
+        void refreshPreviewGrid();
         void setStatus (const juce::String& msg);
         [[nodiscard]] switchblade::analysis::AnalysisMode currentMode() const noexcept;
         [[nodiscard]] float currentSensitivity() const noexcept;

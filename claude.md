@@ -64,3 +64,7 @@ A high-tactile, Art-Deco inspired sample analysis and batch conversion tool. The
   - Solution: You need a Slice Count Ceiling to act as a hard stop.
 
     - Set Ceiling to: 10 (or higher, like 50, to ensure the file is fully processed).
+
+## 	1. ALWAYS query: '/graphify query "your question"'
+	2. Only read raw files if I explicitly say so
+	3. Use 'graphify-out/wiki/index.md' for navigation

@@ -31,6 +31,13 @@ namespace switchblade::palette
     inline const juce::Colour NeonMint       { 0xFF63FFB4 };  // success / active
     inline const juce::Colour NeonCrimson    { 0xFFFF4860 };  // danger / clip
 
+    // Selection — Ctrl+click multi-select export indicator (alias of NeonGold)
+    inline const juce::Colour Selection     { 0xFFFFC84A };
+
+    // Header & background
+    inline const juce::Colour MainBackground  { 0xFF0A0A0A };  // deep charcoal — makes neon elements pop
+    inline const juce::Colour HeaderSeparator { 0xFF222222 };  // 1px header bottom border
+
     // Typography
     inline const juce::Colour TextPrimary    { 0xFFE8ECF2 };
     inline const juce::Colour TextSecondary  { 0xFF9AA2B1 };

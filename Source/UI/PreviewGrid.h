@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <vector>
 
 namespace switchblade::ui
 {
@@ -74,20 +75,36 @@ namespace switchblade::ui
     public:
         using AudioFilePtr = std::shared_ptr<const switchblade::analysis::AudioFile>;
 
+        /** One loaded card's contribution to the grid — one row of up to 4 pads. */
+        struct CardData
+        {
+            AudioFilePtr                                    file;
+            std::vector<switchblade::analysis::Transient>  transients;
+        };
+
         PreviewGrid();
         ~PreviewGrid() override;
 
-        /** Bind a source file + detected transients; slices the first 16
-            onset-to-onset regions into pads. */
+        /** Populate all 16 pads from up to 4 loaded cards.
+            Row 0 (1-2-3-4) = cards[0], Row 1 (Q-W-E-R) = cards[1], etc.
+            Pads with no matching slice are left dark/unloaded. */
+        void setAllCards (std::vector<CardData> cards);
+
+        /** Legacy single-file binding — maps file's slices into row 0 only. */
         void setSource (AudioFilePtr file,
                         std::vector<switchblade::analysis::Transient> transients);
 
         /** Clear all pads (e.g. when no card is selected). */
         void clear() noexcept;
 
-        /** Trigger a one-shot slice directly (e.g. from ResultsVault). */
-        void playSlice (AudioFilePtr file, juce::int64 start, juce::int64 end)
+        /** Trigger a one-shot slice directly (e.g. from ResultsVault).
+            Pass exclusive=true to stop all active voices first — use this for
+            the sidebar play button so each new preview replaces the previous. */
+        void playSlice (AudioFilePtr file, juce::int64 start, juce::int64 end,
+                        bool exclusive = false)
         {
+            if (exclusive)
+                voiceBank_.stopAll();
             voiceBank_.trigger (std::move (file), start, end);
         }
 
@@ -105,10 +122,11 @@ namespace switchblade::ui
     private:
         struct Pad
         {
-            juce::int64 start { -1 };
-            juce::int64 end   { -1 };
+            AudioFilePtr file;              // per-pad source (may differ across rows)
+            juce::int64  start { -1 };
+            juce::int64  end   { -1 };
             juce::String label;
-            float        flash { 0.0f };  // 1.0 on trigger, decays to 0
+            float        flash { 0.0f };   // 1.0 on trigger, decays to 0
         };
 
         static constexpr int kRows = 4;
@@ -130,7 +148,6 @@ namespace switchblade::ui
         void timerCallback() override;
 
         std::array<Pad, kNumPads>     pads_;
-        AudioFilePtr                  file_;
         GridVoiceBank                 voiceBank_;
 
         JUCE_LEAK_DETECTOR (PreviewGrid)

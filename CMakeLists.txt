@@ -31,6 +31,12 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
+# Binary assets — logo PNG embedded at compile time via JUCE binary data
+# -----------------------------------------------------------------------------
+juce_add_binary_data(SwitchbladeAssets SOURCES
+    Source/Assets/logo.png)
+
+# -----------------------------------------------------------------------------
 # Core DSP / analysis library (used by CLI + future GUI app)
 # -----------------------------------------------------------------------------
 add_library(SwitchbladeCore STATIC
@@ -129,6 +135,7 @@ target_link_options(Switchblade PRIVATE /ignore:4099)   # PDB not co-located wit
 
 target_link_libraries(Switchblade
     PRIVATE
+        SwitchbladeAssets
         SwitchbladeCore
         SwitchbladeUI
         juce::juce_gui_extra
@@ -140,6 +147,14 @@ target_link_libraries(Switchblade
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# -----------------------------------------------------------------------------
+# Tests (GoogleTest — requires internet on first configure for FetchContent)
+# -----------------------------------------------------------------------------
+option(SWITCHBLADE_TESTS "Build GoogleTest suite" ON)
+if(SWITCHBLADE_TESTS)
+    add_subdirectory(tests)
+endif()
 
 # -----------------------------------------------------------------------------
 # Optional sanitizer preset (cmake -DSWITCHBLADE_ASAN=ON ...)

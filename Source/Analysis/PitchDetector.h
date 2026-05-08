@@ -154,7 +154,8 @@ namespace switchblade::analysis
         if (hz <= 0.0f) return "?";
         constexpr std::array<const char*, 12> names {
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-        const int midi   = midiNoteFromHz (hz);
+        // Clamp to MIDI [0,127] so the octave/pc arithmetic never overflows
+        const int midi   = std::clamp (midiNoteFromHz (hz), 0, 127);
         const int octave = midi / 12 - 1;
         const int pc     = midi % 12;
         return std::string (names[static_cast<std::size_t> (pc)])

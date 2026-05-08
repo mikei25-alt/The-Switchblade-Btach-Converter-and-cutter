@@ -130,51 +130,58 @@ namespace switchblade::ui
     //==========================================================================
     //  Source binding
     //==========================================================================
-    void PreviewGrid::setSource (AudioFilePtr file,
-                                 std::vector<switchblade::analysis::Transient> transients)
+    void PreviewGrid::setAllCards (std::vector<CardData> cards)
     {
-        file_ = std::move (file);
         voiceBank_.stopAll();
 
-        for (auto& p : pads_)
+        for (int i = 0; i < kNumPads; ++i)
         {
+            auto& p = pads_[static_cast<std::size_t> (i)];
+            p.file.reset();
             p.start = -1;
             p.end   = -1;
             p.flash = 0.0f;
         }
 
-        if (! file_ || transients.empty())
+        // Map each card to one row: card[0] → row 0 (1,2,3,4), etc.
+        for (int row = 0; row < kRows && row < static_cast<int> (cards.size()); ++row)
         {
-            repaint();
-            return;
-        }
+            const auto& cd = cards[static_cast<std::size_t> (row)];
+            if (! cd.file || cd.transients.empty())
+                continue;
 
-        // Slice to natural energy-decay end (full ADSR preserved).
-        // Slices may overlap — each pad is an independent one-shot.
-        // Fall back to next-onset boundary only when naturalEnd is not set.
-        const juce::int64 fileLen = file_->samples.getNumSamples();
-        const std::size_t numSlices = std::min (
-            static_cast<std::size_t> (kNumPads), transients.size());
+            const juce::int64 fileLen = cd.file->samples.getNumSamples();
+            const int n = std::min (kCols, static_cast<int> (cd.transients.size()));
 
-        for (std::size_t i = 0; i < numSlices; ++i)
-        {
-            const juce::int64 start = transients[i].sampleIndex;
-            const juce::int64 end   = (transients[i].naturalEnd > 0)
-                ? transients[i].naturalEnd
-                : ((i + 1 < transients.size())
-                    ? transients[i + 1].sampleIndex
-                    : fileLen);
-            pads_[i].start = start;
-            pads_[i].end   = std::min (end, fileLen);
+            for (int col = 0; col < n; ++col)
+            {
+                auto& pad = pads_[static_cast<std::size_t> (row * kCols + col)];
+                const std::size_t si = static_cast<std::size_t> (col);
+                pad.file  = cd.file;
+                pad.start = cd.transients[si].sampleIndex;
+                const juce::int64 rawEnd =
+                    (cd.transients[si].naturalEnd > 0)
+                    ? cd.transients[si].naturalEnd
+                    : (si + 1 < cd.transients.size()
+                        ? cd.transients[si + 1].sampleIndex : fileLen);
+                pad.end = std::min (rawEnd, fileLen);
+            }
         }
         repaint();
     }
 
+    void PreviewGrid::setSource (AudioFilePtr file,
+                                 std::vector<switchblade::analysis::Transient> transients)
+    {
+        std::vector<CardData> cards;
+        cards.push_back ({ std::move (file), std::move (transients) });
+        setAllCards (std::move (cards));
+    }
+
     void PreviewGrid::clear() noexcept
     {
-        file_.reset();
         voiceBank_.stopAll();
-        for (auto& p : pads_) { p.start = -1; p.end = -1; p.flash = 0.0f; }
+        for (auto& p : pads_) { p.file.reset(); p.start = -1; p.end = -1; p.flash = 0.0f; }
         repaint();
     }
 
@@ -186,11 +193,11 @@ namespace switchblade::ui
         if (index < 0 || index >= kNumPads)
             return;
         auto& pad = pads_[static_cast<std::size_t> (index)];
-        if (pad.start < 0 || ! file_)
+        if (pad.start < 0 || ! pad.file)
             return;
 
-        voiceBank_.trigger (file_, pad.start, pad.end);
-        pad.flash = 1.0f;   // Full intensity neon pulse
+        voiceBank_.trigger (pad.file, pad.start, pad.end);
+        pad.flash = 1.0f;
         repaint (padBounds (index));
     }
 
@@ -223,7 +230,7 @@ namespace switchblade::ui
         {
             const auto& pad    = pads_[static_cast<std::size_t> (i)];
             const auto  bounds = padBounds (i).reduced (3);
-            const bool  loaded = pad.start >= 0;
+            const bool  loaded = pad.start >= 0 && pad.file != nullptr;
             const float flash  = pad.flash;
 
             // Chrome bevel
@@ -261,14 +268,15 @@ namespace switchblade::ui
             if (flash > 0.0f)
             {
                 // Multi-ring glow for tactile feedback
-                for (int i = 3; i >= 1; --i)
+                for (int ring = 3; ring >= 1; --ring)
                 {
-                    const float ringAlpha = flash * 0.4f / static_cast<float> (i);
-                    const float ringWidth = 1.0f + static_cast<float> (i) * 0.5f;
+                    const float fRing     = static_cast<float> (ring);
+                    const float ringAlpha = flash * 0.4f / fRing;
+                    const float ringWidth = 1.0f + fRing * 0.5f;
                     g.setColour (pal::NeonCyan.withAlpha (ringAlpha));
                     g.drawRoundedRectangle (
-                        bounds.expanded (static_cast<float> (i)).toFloat(),
-                        6.0f + static_cast<float> (i),
+                        bounds.expanded (ring).toFloat(),
+                        6.0f + fRing,
                         ringWidth);
                 }
             }

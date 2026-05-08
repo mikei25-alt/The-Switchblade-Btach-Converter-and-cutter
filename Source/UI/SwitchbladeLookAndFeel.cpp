@@ -127,6 +127,9 @@ namespace switchblade::ui
 
         paintChromeBevel (g, bounds, radius, shouldDrawButtonAsDown);
 
+        // Always-on thin neon rim — every control is "electrified"
+        paintNeonGlow (g, bounds, pal::NeonCyan, 0.22f, radius);
+
         if (shouldDrawButtonAsHighlighted || button.getToggleState())
         {
             const auto neon = button.getToggleState() ? pal::NeonMint : pal::NeonCyan;
@@ -324,6 +327,18 @@ namespace switchblade::ui
 
         paintChromeBevel (g, thumb, thumbDia * 0.5f,
                           slider.isMouseOverOrDragging (true));
+
+        // Active-state neon bloom — fill track and thumb glow when interacting
+        if (slider.isMouseOverOrDragging (true))
+        {
+            g.setColour (pal::NeonCyan.withAlpha (0.18f));
+            g.fillRoundedRectangle (
+                horizontal ? fill.expanded (0.0f, 3.0f)
+                           : fill.expanded (3.0f, 0.0f), 5.0f);
+
+            paintNeonGlow (g, thumb.expanded (1.0f), pal::NeonCyan, 0.55f,
+                           thumbDia * 0.5f + 1.0f);
+        }
     }
 
     //==========================================================================

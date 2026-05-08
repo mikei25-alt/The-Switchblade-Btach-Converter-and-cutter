@@ -27,12 +27,13 @@ namespace switchblade::analysis
     public:
         struct Params
         {
-            std::size_t windowSize { 43 };      // ~500ms at 11.6ms hop
-            float       k          { 2.8f };    // MAD multiplier — raised to reduce false positives
-            float       floorAbs   { 0.08f };   // absolute minimum — raised to suppress low-energy noise
+            std::size_t windowSize { 65 };      // ~750ms at 11.6ms hop — wider window smooths ghost triggers
+            float       k          { 2.4f };    // MAD multiplier — slightly relaxed so the gate stays responsive across long files
+            float       floorAbs   { 0.008f };  // absolute minimum — low enough to catch quiet material (e.g. -60 dBFS triangle dings) while still sitting above digital noise
         };
 
-        explicit AdaptiveThreshold (Params p = {}) noexcept : params_ (p) {}
+        explicit AdaptiveThreshold (Params p = {})
+            : params_ (p), scratch_ (p.windowSize) {}
 
         void reset() noexcept { window_.clear(); }
 
@@ -50,24 +51,28 @@ namespace switchblade::analysis
     private:
         [[nodiscard]] float compute() const
         {
-            if (window_.size() < 4)
+            const std::size_t n = window_.size();
+            if (n < 4)
                 return params_.floorAbs;
 
-            std::vector<float> sorted (window_.begin(), window_.end());
-            std::sort (sorted.begin(), sorted.end());
-            const float median = sorted[sorted.size() / 2];
+            // Reuse the pre-allocated scratch buffer — no heap alloc per call.
+            // Two sorts on n ≤ 65 elements; sort is the bottleneck, not the alloc.
+            std::copy (window_.begin(), window_.end(), scratch_.begin());
+            std::sort (scratch_.begin(), scratch_.begin() + n);
+            const float median = scratch_[n / 2];
 
-            std::vector<float> devs (sorted.size());
-            for (std::size_t i = 0; i < sorted.size(); ++i)
-                devs[i] = std::abs (sorted[i] - median);
-            std::sort (devs.begin(), devs.end());
-            const float mad = devs[devs.size() / 2];
+            // Reuse the same buffer for MAD deviations (overwrite in-place).
+            for (std::size_t i = 0; i < n; ++i)
+                scratch_[i] = std::abs (scratch_[i] - median);
+            std::sort (scratch_.begin(), scratch_.begin() + n);
+            const float mad = scratch_[n / 2];
 
             return std::max (params_.floorAbs,
                              median + params_.k * 1.4826f * mad);
         }
 
-        Params              params_;
-        std::deque<float>   window_;
+        Params                    params_;
+        std::deque<float>         window_;
+        mutable std::vector<float> scratch_; // pre-sized to windowSize at construction
     };
 } // namespace switchblade::analysis

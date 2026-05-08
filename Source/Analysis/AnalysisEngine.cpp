@@ -4,10 +4,42 @@
 #include "Analysis/SliceBoundary.h"
 #include "Analysis/NoteSegmenter.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <numeric>
 #include <utility>
 
 namespace switchblade::analysis
 {
+    namespace
+    {
+        // Returns the linear RMS amplitude of a sample range across all channels.
+        // Used by the Top-4 guardrail to detect silent/empty slices.
+        [[nodiscard]] float computeSliceRms (const juce::AudioBuffer<float>& buf,
+                                             std::int64_t start, std::int64_t end)
+        {
+            const int numCh = buf.getNumChannels();
+            const int total = buf.getNumSamples();
+            const int s     = static_cast<int> (std::clamp (start, std::int64_t{0},
+                                                             static_cast<std::int64_t> (total)));
+            const int e     = static_cast<int> (std::clamp (end,   std::int64_t{0},
+                                                             static_cast<std::int64_t> (total)));
+            const int numS  = e - s;
+            if (numCh <= 0 || numS <= 0)
+                return 0.0f;
+
+            double sumSq = 0.0;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                const float* r = buf.getReadPointer (ch, s);
+                for (int i = 0; i < numS; ++i)
+                    sumSq += static_cast<double> (r[i]) * static_cast<double> (r[i]);
+            }
+            return static_cast<float> (std::sqrt (sumSq / static_cast<double> (numCh * numS)));
+        }
+    } // namespace
+
     //==========================================================================
     //  JSON serialisation
     //==========================================================================
@@ -238,14 +270,20 @@ namespace switchblade::analysis
                                 {
                                     pitchClarity = pr->clarity;
                                     autoPitchHz  = pr->f0Hz;
-                                    if (pitchClarity > 0.60f)
-                                        break;
+                                    if (pitchClarity > 0.55f)
+                                        break;  // good enough — stop scanning early
                                 }
                             }
                         }
                     }
 
-                    if (pitchClarity > 0.60f && onsetRate < 5.0)
+                    // Melodic threshold: tonal material (triangle, piano, singing,
+                    // bell) typically has pitchClarity > 0.40 and sparse onsets.
+                    // Kick/snare loops have high onsetRate (> 1.5/s) so the rate
+                    // gate keeps them Percussive even if they have tonal content.
+                    // Single-shot kicks are short (< 200ms) so their onsetRate
+                    // from the single-onset fallback is >> 1.5/s.
+                    if (pitchClarity > 0.40f && onsetRate < 1.5)
                     {
                         result.classification = SourceClass::Melodic;
                         result.pitchHz        = autoPitchHz;
@@ -290,52 +328,151 @@ namespace switchblade::analysis
                 return jobHasFinished;
             }
 
-            // ── Density Guard ────────────────────────────────────────────────
-            // Runs before computeNaturalEnds so we only process the final set.
-
-            // Percussive: cap at 8 slices (or 4/sec for longer loops)
-            if (result.classification == SourceClass::Percussive && result.transients.size() > 8)
-            {
-                const double durationSec = (file->sampleRate > 0.0 && file->originalLengthInSamples > 0)
-                    ? static_cast<double> (file->originalLengthInSamples) / file->sampleRate
-                    : 0.0;
-                const double maxSlices = std::max (8.0, std::ceil (durationSec * 4.0));
-                const std::size_t targetCount = static_cast<std::size_t> (
-                    std::min (static_cast<double> (result.transients.size()), maxSlices));
-
-                if (targetCount < result.transients.size())
-                {
-                    std::sort (result.transients.begin(), result.transients.end(),
-                        [] (const auto& a, const auto& b) { return a.confidence > b.confidence; });
-                    result.transients.resize (targetCount);
-                    std::sort (result.transients.begin(), result.transients.end(),
-                        [] (const auto& a, const auto& b) { return a.sampleIndex < b.sampleIndex; });
-                }
-            }
-
-            // Melodic: hard cap at 4 slices, kept in temporal order.
-            // Note segmenter already returns notes in time order; we trim the tail.
-            if (result.classification == SourceClass::Melodic && result.transients.size() > 4)
-                result.transients.resize (4);
-
-            // ── Fill in energy-based natural ends for every transient ────────
+            // ── Natural ends (needed before guardrail for accurate RMS windows) ──
+            // Use the default -50 dB floor — the stratified guardrail's
+            // next-onset gap clamp (20 ms) already prevents overlap between
+            // adjacent slices without truncating the tail of single-shot samples.
             if (! result.transients.empty())
-                computeNaturalEnds (*file, result.transients);
+                computeNaturalEnds (*file, result.transients, -50.0f);
 
-            // ── Melodic slice duration cap: 2 seconds max per slice ──────────
-            // Melodic export filename carries the detected pitch badge (e.g. _A4_);
-            // pitchHz is stored on result and consumed by MainContainer export.
-            // Slice length is capped here so exported samples are 1-2s usable hits.
-            if (result.classification == SourceClass::Melodic && ! result.transients.empty())
+            // ── Stratified Top-4 curated one-shot guardrail ──────────────────
+            // Pure confidence ranking causes the 4 picks to bunch together at
+            // the loudest section of long files (e.g. a periodic triangle
+            // melody where every ding has similar energy — the detector keeps
+            // the first 4 dings and ignores the rest of the file). To get
+            // representative coverage we stratify: split the file into 4 equal
+            // time bands and pick the highest-confidence onset in each band.
+            // Empty bands are filled in by next-best confidence overall.
+            //
+            // Steps (all on the analysis thread — thread-safe):
+            //   1. Snapshot all onset positions (used to clamp slice ends).
+            //   2. Bucket onsets into 4 time bands; keep the strongest per band.
+            //   3. Backfill empty bands from the highest remaining confidence.
+            //   4. For each kept slice: cap end at next-onset minus 20 ms gap,
+            //      truncate to 1.5 s, discard if RMS < -45 dB.
+            //   5. Re-sort kept slices by time for playback order.
+            if (! result.transients.empty())
             {
-                const std::int64_t maxSliceSamples =
-                    static_cast<std::int64_t> (2.0 * file->sampleRate);
-                for (auto& t : result.transients)
+                constexpr float      kMaxSliceSec  = 1.5f;
+                // Adaptive RMS gate: purely relative — discard a slice only if its
+                // RMS is below 10 % of the loudest slice in the file (-20 dB).
+                // The gate scales with the actual content so quiet material
+                // (e.g. a -60 dBFS triangle melody) is never culled by a fixed
+                // absolute floor. Only completely silent files (maxRms < -80dBFS)
+                // produce 0 slices.
+                constexpr float      kAbsoluteRmsFloor = 0.0001f;   // -80 dB safety
+                constexpr float      kRelativeRmsRatio = 0.10f;     // -20 dB peak
+                constexpr int        kMaxSlices    = 4;
+                const std::int64_t   maxSliceSamples =
+                    static_cast<std::int64_t> (kMaxSliceSec * file->sampleRate);
+                const std::int64_t   totalSamples = file->samples.getNumSamples();
+                const std::int64_t   kSliceGap =
+                    static_cast<std::int64_t> (0.020 * file->sampleRate); // 20 ms
+
+                // Snapshot all onset positions in temporal order
+                std::vector<std::int64_t> allOnsets;
+                allOnsets.reserve (result.transients.size());
+                for (const auto& t : result.transients)
+                    allOnsets.push_back (t.sampleIndex);
+                std::sort (allOnsets.begin(), allOnsets.end());
+
+                // ── Stratified pick: best-of-band, then backfill ─────────────
+                const std::int64_t bandSize = std::max<std::int64_t> (
+                    1, totalSamples / kMaxSlices);
+
+                std::array<int, kMaxSlices> bestPerBand;   // index into transients (-1 = empty)
+                bestPerBand.fill (-1);
+
+                for (int i = 0; i < static_cast<int> (result.transients.size()); ++i)
                 {
-                    const std::int64_t cap = t.sampleIndex + maxSliceSamples;
-                    if (t.naturalEnd <= 0 || t.naturalEnd > cap)
-                        t.naturalEnd = cap;
+                    const auto& t = result.transients[static_cast<std::size_t> (i)];
+                    int band = static_cast<int> (t.sampleIndex / bandSize);
+                    if (band < 0)              band = 0;
+                    if (band >= kMaxSlices)    band = kMaxSlices - 1;
+
+                    const int prev = bestPerBand[static_cast<std::size_t> (band)];
+                    if (prev < 0
+                        || t.confidence > result.transients[static_cast<std::size_t> (prev)].confidence)
+                    {
+                        bestPerBand[static_cast<std::size_t> (band)] = i;
+                    }
                 }
+
+                std::vector<int> chosen;
+                chosen.reserve (kMaxSlices);
+                for (int idx : bestPerBand)
+                    if (idx >= 0) chosen.push_back (idx);
+
+                // Backfill from highest-confidence remaining if any band was empty
+                if (static_cast<int> (chosen.size()) < kMaxSlices
+                    && result.transients.size() > chosen.size())
+                {
+                    std::vector<int> ranked (result.transients.size());
+                    std::iota (ranked.begin(), ranked.end(), 0);
+                    std::sort (ranked.begin(), ranked.end(),
+                        [&] (int a, int b)
+                        {
+                            return result.transients[static_cast<std::size_t> (a)].confidence
+                                 > result.transients[static_cast<std::size_t> (b)].confidence;
+                        });
+
+                    for (int idx : ranked)
+                    {
+                        if (static_cast<int> (chosen.size()) >= kMaxSlices) break;
+                        if (std::find (chosen.begin(), chosen.end(), idx) == chosen.end())
+                            chosen.push_back (idx);
+                    }
+                }
+
+                // ── Two-pass: first finalise boundaries + measure RMS, then
+                //    derive an adaptive RMS floor from the loudest chosen slice
+                //    and apply the gate. This way the gate scales with the
+                //    actual loudness of the material instead of dropping every
+                //    slice when the whole file sits below a fixed threshold.
+                struct Candidate { Transient t; float rms; };
+                std::vector<Candidate> finalised;
+                finalised.reserve (chosen.size());
+                float maxRms = 0.0f;
+                for (int idx : chosen)
+                {
+                    Transient t = result.transients[static_cast<std::size_t> (idx)];
+
+                    std::int64_t rawEnd =
+                        (t.naturalEnd > 0) ? t.naturalEnd : totalSamples;
+
+                    for (const auto onset : allOnsets)
+                    {
+                        if (onset > t.sampleIndex + 1)
+                        {
+                            const std::int64_t cap = onset - kSliceGap;
+                            if (cap > t.sampleIndex && rawEnd > cap)
+                                rawEnd = cap;
+                            break;
+                        }
+                    }
+
+                    t.naturalEnd = std::min (rawEnd, t.sampleIndex + maxSliceSamples);
+
+                    const float rms = computeSliceRms (
+                        file->samples, t.sampleIndex, t.naturalEnd);
+
+                    maxRms = std::max (maxRms, rms);
+                    finalised.push_back ({ t, rms });
+                }
+
+                const float adaptiveFloor = std::max (kAbsoluteRmsFloor,
+                                                      maxRms * kRelativeRmsRatio);
+
+                std::vector<Transient> kept;
+                kept.reserve (finalised.size());
+                for (auto& c : finalised)
+                    if (c.rms >= adaptiveFloor)
+                        kept.push_back (c.t);
+
+                std::sort (kept.begin(), kept.end(),
+                    [] (const auto& a, const auto& b) { return a.sampleIndex < b.sampleIndex; });
+
+                result.transients = std::move (kept);
             }
 
             dispatch (std::move (result));

@@ -1,9 +1,13 @@
 #include "MainContainer.h"
 #include "Core/Palette.h"
 #include "Analysis/PitchDetector.h"
+#include "Analysis/SliceBoundary.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include "BinaryData.h"
+
+#include <algorithm>
 #include <filesystem>
 #include <sstream>
 
@@ -142,7 +146,8 @@ namespace switchblade::ui
         {
             g.setFont (juce::Font (juce::FontOptions { 11.0f }));
             g.setColour (pal::TextSecondary.withAlpha (0.65f));
-            g.drawText ("WAV  \xc2\xb7  AIFF  \xc2\xb7  MP3  \xc2\xb7  FLAC  \xc2\xb7  OGG",
+            g.drawText (juce::String (juce::CharPointer_UTF8 (
+                            "WAV  \xc2\xb7  AIFF  \xc2\xb7  MP3  \xc2\xb7  FLAC  \xc2\xb7  OGG")),
                         juce::Rectangle<float> (inner.getX(), cy + 24.0f,
                                                inner.getWidth(), 18.0f).toNearestInt(),
                         juce::Justification::centred, false);
@@ -151,7 +156,8 @@ namespace switchblade::ui
 
     namespace
     {
-        constexpr int kTopBarH      = 48;
+        constexpr int kTopBarH      = 80;
+        constexpr int kBrandWidth   = 262;   // left brand area: logo + wordmark (painted in paint())
         constexpr int kGridFrac     = 30;
         constexpr int kPreviewGridH = 300;   // fixed height for the 4x4 pad grid
 
@@ -173,6 +179,9 @@ namespace switchblade::ui
         }
 
         // std::format portable alternative — avoids MSVC 2019 compatibility risk
+        // Filename format:
+        //   Melodic (keySuffix set): [stem]_[Note]_[Index].wav  e.g. SerumLead_C#3_01.wav
+        //   All other modes:         [stem]_[tag]_[Index].wav   e.g. drums_perc_01.wav
         [[nodiscard]] juce::String makeSliceFilename (
             const juce::String& stem,
             const char* tag,
@@ -180,9 +189,11 @@ namespace switchblade::ui
             int index)
         {
             std::ostringstream ss;
-            ss << stem.toStdString() << '_' << tag;
+            ss << stem.toStdString() << '_';
             if (keySuffix.isNotEmpty())
-                ss << '_' << keySuffix.toStdString();
+                ss << keySuffix.toStdString();   // Note replaces tag for Melodic
+            else
+                ss << tag;
             ss << '_';
             if (index < 100) ss << '0';
             if (index < 10)  ss << '0';
@@ -224,15 +235,44 @@ namespace switchblade::ui
         addAndMakeVisible (sensitivityLabel_);
 
         // Buttons
-        extractAllBtn_.onClick = [this] { extractAll(); };
-        produceBtn_.onClick    = [this] { produceAllSlices(); };
+        extractAllBtn_.onClick      = [this] { extractAll(); };
+        produceBtn_.onClick         = [this] { produceAllSlices(); };
+        exportSelectionBtn_.onClick = [this] { exportSelection(); };
+
+        // Right-click on Produce / Export Selection → normalization level picker
+        auto showNormMenu = [this]
+        {
+            juce::PopupMenu menu;
+            menu.addItem (1, "No normalization",   true, normTargetDb_ == 0.0f);
+            menu.addItem (2, "Normalize to -1 dBFS", true, normTargetDb_ == -1.0f);
+            menu.addItem (3, "Normalize to -3 dBFS", true, normTargetDb_ == -3.0f);
+            menu.addItem (4, "Normalize to -6 dBFS", true, normTargetDb_ == -6.0f);
+            menu.showMenuAsync (juce::PopupMenu::Options{},
+                [this] (int result)
+                {
+                    constexpr float kLevels[] = { 0.0f, -1.0f, -3.0f, -6.0f };
+                    if (result >= 1 && result <= 4)
+                        setNormTarget (kLevels[result - 1]);
+                });
+        };
+        produceBtn_.onRightClick         = showNormMenu;
+        exportSelectionBtn_.onRightClick = showNormMenu;
+
         addAndMakeVisible (extractAllBtn_);
         addAndMakeVisible (produceBtn_);
+        addAndMakeVisible (exportSelectionBtn_);
+
+        // Live "N selected" indicator next to Export Selection
+        selectionCountLabel_.setText ("0 selected", juce::dontSendNotification);
+        selectionCountLabel_.setColour (juce::Label::textColourId, pal::TextSecondary);
+        selectionCountLabel_.setJustificationType (juce::Justification::centredLeft);
+        selectionCountLabel_.setFont (juce::Font (juce::FontOptions { 11.0f }).boldened());
+        addAndMakeVisible (selectionCountLabel_);
 
         // Status
-        statusLabel_.setText ("Drop audio files to begin.", juce::dontSendNotification);
-        statusLabel_.setColour (juce::Label::textColourId, pal::TextSecondary);
-        statusLabel_.setJustificationType (juce::Justification::centredLeft);
+        statusLabel_.setText ("Drop audio files to begin.");
+        statusLabel_.setColour (pal::TextSecondary);
+        statusLabel_.setJustification (juce::Justification::centredLeft);
         addAndMakeVisible (statusLabel_);
 
         // Card viewport
@@ -267,6 +307,10 @@ namespace switchblade::ui
         resultsVault_->onExportCollection = [this]
         {
             produceAllSlices();
+        };
+        resultsVault_->onSelectionChanged = [this]
+        {
+            updateSelectionCount();
         };
 
         // Engine callbacks
@@ -311,19 +355,33 @@ namespace switchblade::ui
     {
         auto area = getLocalBounds();
 
-        // Top bar
-        auto bar = area.removeFromTop (kTopBarH).reduced (8, 6);
-        modeCombo_.setBounds          (bar.removeFromLeft (130));
+        // Top bar — 80px tall; 10px vertical padding for controls
+        auto bar = area.removeFromTop (kTopBarH);
+        bar.reduce (0, 10);
+
+        // Far left: branding painted in paint() — just reserve space
+        bar.removeFromLeft (kBrandWidth);
+        bar.removeFromLeft (16);  // gap between brand and first control
+
+        // Far right: export buttons, laid out right-to-left then reversed
+        bar.removeFromRight (8);  // right edge breathing room
+        auto rightButtons = bar.removeFromRight (130 + 6 + 110 + 6 + 130 + 6 + 96);
+        extractAllBtn_.setBounds      (rightButtons.removeFromLeft (130));
+        rightButtons.removeFromLeft (6);
+        produceBtn_.setBounds         (rightButtons.removeFromLeft (110));
+        rightButtons.removeFromLeft (6);
+        exportSelectionBtn_.setBounds (rightButtons.removeFromLeft (130));
+        rightButtons.removeFromLeft (6);
+        selectionCountLabel_.setBounds(rightButtons.removeFromLeft (96));
+
+        // Centre: mode combo + sensitivity; status label takes whatever remains
+        modeCombo_.setBounds        (bar.removeFromLeft (130));
         bar.removeFromLeft (8);
-        sensitivityLabel_.setBounds   (bar.removeFromLeft (76));   // explicit — no attachToComponent
+        sensitivityLabel_.setBounds (bar.removeFromLeft (76));
         bar.removeFromLeft (4);
-        sensitivitySlider_.setBounds  (bar.removeFromLeft (160));
+        sensitivitySlider_.setBounds(bar.removeFromLeft (160));
         bar.removeFromLeft (12);
-        extractAllBtn_.setBounds      (bar.removeFromLeft (130));
-        bar.removeFromLeft (6);
-        produceBtn_.setBounds         (bar.removeFromLeft (110));
-        bar.removeFromLeft (12);
-        statusLabel_.setBounds        (bar);
+        statusLabel_.setBounds      (bar);
 
         // Body split — right panel: PreviewGrid (top fixed) + ResultsVault (rest)
         const int gridW = area.getWidth() * kGridFrac / 100;
@@ -345,41 +403,143 @@ namespace switchblade::ui
         const float w = static_cast<float> (getWidth());
         const float h = static_cast<float> (getHeight());
 
-        // Body fill
-        g.fillAll (pal::ChromeVoid);
+        // Deep charcoal main background
+        g.fillAll (pal::MainBackground);
 
-        // Top-bar chrome gradient
+        // ── Header panel — distinctly lighter zone so the bar reads as a surface ─
         {
+            // Top: steel-blue-black → bottom: pure MainBackground
             juce::ColourGradient grad {
-                pal::ChromeDark.withAlpha (0.85f), 0.0f,               0.0f,
-                pal::ChromeVoid,                   0.0f, static_cast<float> (kTopBarH), false };
+                juce::Colour (0xFF14171F), 0.0f, 0.0f,
+                pal::MainBackground,       0.0f, static_cast<float> (kTopBarH), false };
             g.setGradientFill (grad);
             g.fillRect (0, 0, getWidth(), kTopBarH);
         }
 
-        // Top-bar bottom line (neon hairline)
-        g.setColour (pal::NeonCyan.withAlpha (0.22f));
-        g.drawHorizontalLine (kTopBarH,     0.0f, w);
-        g.setColour (pal::ChromeMid.withAlpha (0.35f));
-        g.drawHorizontalLine (kTopBarH + 1, 0.0f, w);
-
-        // "THE SWITCHBLADE" logotype — drawn in the top-bar, right-aligned
+        // ── Branding: Logo + Two-line Wordmark (Top-Left) ────────────────────────
         {
-            const auto logoR = juce::Rectangle<float> (w - 190.0f, 0.0f, 180.0f,
-                                                       static_cast<float> (kTopBarH));
-            g.setFont (juce::Font (juce::FontOptions { 12.5f }).boldened());
-            // Two-tone gradient: chrome → neon
-            juce::ColourGradient lg { pal::ChromeHigh, logoR.getX(), logoR.getCentreY(),
-                                      pal::NeonCyan,  logoR.getRight(), logoR.getCentreY(), false };
-            g.setGradientFill (lg);
-            g.drawText ("THE  SWITCHBLADE", logoR.toNearestInt(),
-                        juce::Justification::centredRight, false);
+            const auto logo = juce::ImageCache::getFromMemory (
+                BinaryData::logo_png, BinaryData::logo_pngSize);
 
-            // Vertical hairline separator before the logotype
-            g.setColour (pal::ChromeMid.withAlpha (0.40f));
-            g.drawVerticalLine (static_cast<int> (w - 196.0f),
-                                5.0f, static_cast<float> (kTopBarH) - 5.0f);
+            // Logo geometry — 56px fills the 80px bar with 12px breathing room each side
+            constexpr float kLogoPadX = 14.0f;
+            constexpr float kLogoSize = 56.0f;
+            const float kLogoPadY = (static_cast<float> (kTopBarH) - kLogoSize) * 0.5f;
+            const juce::Rectangle<float> badge (kLogoPadX, kLogoPadY, kLogoSize, kLogoSize);
+
+            // Ambient radial glow emanating from logo — gives the header "life"
+            {
+                const float cx = badge.getCentreX();
+                const float cy = badge.getCentreY();
+                juce::ColourGradient radial (
+                    pal::NeonCyan.withAlpha (0.12f), cx, cy,
+                    juce::Colours::transparentBlack, cx + 160.0f, cy,
+                    true);
+                g.setGradientFill (radial);
+                g.fillRect (0, 0, static_cast<int> (cx + 180.0f), kTopBarH);
+            }
+
+            // Multi-pass outer glow — 0x8800FBFF (#00FBFF at 53% alpha)
+            const juce::Colour logoGlow { 0x8800FBFF };
+            for (int i = 6; i >= 1; --i)
+            {
+                const float r     = static_cast<float> (i) * 1.5f;
+                const float alpha = logoGlow.getFloatAlpha()
+                                  * (static_cast<float> (i) / 6.0f) * 0.65f;
+                g.setColour (logoGlow.withAlpha (alpha));
+                g.drawRoundedRectangle (badge.expanded (r), 8.0f + r * 0.3f, r * 0.7f);
+            }
+            // Crisp inner rim
+            g.setColour (pal::NeonCyan.withAlpha (0.70f));
+            g.drawRoundedRectangle (badge.expanded (1.0f), 8.0f, 1.5f);
+
+            // Badge body — dark inner gradient so logo pops against it
+            {
+                juce::ColourGradient fill (
+                    juce::Colour (0xFF1A1E2A), badge.getX(),    badge.getY(),
+                    juce::Colour (0xFF0C0E14), badge.getRight(), badge.getBottom(),
+                    false);
+                g.setGradientFill (fill);
+                g.fillRoundedRectangle (badge, 7.0f);
+            }
+
+            // Subtle inner highlight rim (top-left catch light)
+            g.setColour (juce::Colours::white.withAlpha (0.06f));
+            g.drawRoundedRectangle (badge.reduced (0.5f), 6.5f, 1.0f);
+
+            // Logo image — high-quality resampling
+            if (! logo.isNull())
+            {
+                g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+                g.drawImageWithin (logo,
+                    static_cast<int> (badge.getX() + 2),
+                    static_cast<int> (badge.getY() + 2),
+                    static_cast<int> (badge.getWidth()  - 4),
+                    static_cast<int> (badge.getHeight() - 4),
+                    juce::RectanglePlacement::centred
+                    | juce::RectanglePlacement::onlyReduceInSize);
+                g.setImageResamplingQuality (juce::Graphics::mediumResamplingQuality);
+
+                // 1.2× brightness lift via white additive overlay
+                g.setColour (juce::Colours::white.withAlpha (0.15f));
+                g.fillRoundedRectangle (badge.reduced (2.0f), 5.0f);
+            }
+
+            // Two-line wordmark — hierarchy like a real product name
+            const float textX   = kLogoPadX + kLogoSize + 11.0f;
+            const float barHf   = static_cast<float> (kTopBarH);
+
+            // Line 1: "THE" — small, secondary, tracked wide
+            {
+                const auto labelFont = juce::Font (juce::FontOptions { 9.5f })
+                                           .boldened()
+                                           .withExtraKerningFactor (0.35f);
+                g.setFont (labelFont);
+                g.setColour (pal::NeonCyan.withAlpha (0.55f));
+                const auto r = juce::Rectangle<float> (textX, barHf * 0.24f,
+                                                        160.0f, 14.0f);
+                g.drawText ("T H E", r.toNearestInt(),
+                            juce::Justification::centredLeft, false);
+            }
+
+            // Line 2: "SWITCHBLADE" — large, dominant, near-white
+            {
+                const auto nameFont = juce::Font (juce::FontOptions { 20.0f })
+                                          .boldened()
+                                          .withExtraKerningFactor (0.08f);
+                g.setFont (nameFont);
+
+                const auto nameR = juce::Rectangle<float> (
+                    textX, barHf * 0.44f,
+                    static_cast<float> (kBrandWidth) - textX - 4.0f, 26.0f);
+
+                // Cyan glow pass — drawn 1px below for a "lit from behind" effect
+                g.setColour (pal::NeonCyan.withAlpha (0.22f));
+                g.drawText ("SWITCHBLADE",
+                            nameR.translated (0.0f, 1.0f).toNearestInt(),
+                            juce::Justification::centredLeft, false);
+
+                // Primary — near-white with the faintest warm tint
+                g.setColour (juce::Colour (0xFFF2F6FF));
+                g.drawText ("SWITCHBLADE", nameR.toNearestInt(),
+                            juce::Justification::centredLeft, false);
+            }
+
+            // Vertical separator rule between brand and controls
+            const float sepX = static_cast<float> (kBrandWidth) + 8.0f;
+            g.setColour (pal::NeonCyan.withAlpha (0.15f));
+            g.drawVerticalLine (static_cast<int> (sepX),
+                                barHf * 0.15f, barHf * 0.85f);
+            g.setColour (pal::ChromeMid.withAlpha (0.25f));
+            g.drawVerticalLine (static_cast<int> (sepX) + 1,
+                                barHf * 0.15f, barHf * 0.85f);
         }
+
+        // Header bottom border — crisp neon ignition line + hard dark edge
+        g.setColour (pal::NeonCyan.withAlpha (0.45f));
+        g.drawHorizontalLine (kTopBarH - 1, 0.0f, w);
+        g.setColour (pal::HeaderSeparator);
+        g.drawHorizontalLine (kTopBarH, 0.0f, w);
 
         // Vertical divider between card area and right panel
         const int gridW = getWidth() * kGridFrac / 100;
@@ -435,6 +595,10 @@ namespace switchblade::ui
             card->setDisplayPath (path);
             card->setLoading (false);   // onStarted will flip this
             card->onSelected = [this, rawCard = card.get()] { selectCard (rawCard); };
+            card->onMultiSelectChanged = [this] { updateSelectionCount(); };
+            card->onModeChangeRequested = [this, rawCard = card.get()]
+                (switchblade::analysis::AnalysisMode m) { reAnalyzeCard (rawCard, m); };
+            card->setNormDb (normTargetDb_);
 
             SampleCard* raw = card.get();
             cardList_->addCard (raw);
@@ -452,8 +616,10 @@ namespace switchblade::ui
             analyzing_ = true;
             const int totalPending = static_cast<int> (pendingCards_.size());
             extractAllBtn_.setButtonText (
-                "ANALYZING\xe2\x80\xa6 (" + juce::String (totalPending) + ")");
-            setStatus (juce::String (queued) + " file(s) queued\xe2\x80\xa6");
+                juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
+                + juce::String (totalPending) + ")");
+            setStatus (juce::String (queued)
+                + juce::String (juce::CharPointer_UTF8 (" file(s) queued\xe2\x80\xa6")));
         }
     }
 
@@ -491,7 +657,8 @@ namespace switchblade::ui
             // Still update the button count — this job is now done
             if (analyzing_ && ! pendingCards_.empty())
                 extractAllBtn_.setButtonText (
-                    "ANALYZING\xe2\x80\xa6 (" + juce::String (pendingCards_.size()) + ")");
+                    juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
+                    + juce::String (pendingCards_.size()) + ")");
             return;
         }
 
@@ -502,7 +669,8 @@ namespace switchblade::ui
                 extractAllBtn_.setButtonText ("Extract All");   // last one cleared
             else
                 extractAllBtn_.setButtonText (
-                    "ANALYZING\xe2\x80\xa6 (" + juce::String (pendingCards_.size()) + ")");
+                    juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
+                    + juce::String (pendingCards_.size()) + ")");
         }
 
         // Load audio into a shared_ptr for card + preview grid
@@ -526,6 +694,7 @@ namespace switchblade::ui
             cardList_->addCard (card);
             cards_.push_back (std::move (newCard));
             card->onSelected = [this, card] { selectCard (card); };
+            card->onMultiSelectChanged = [this] { updateSelectionCount(); };
         }
 
         // Populate
@@ -541,24 +710,63 @@ namespace switchblade::ui
         card->setPitchClarity (result.pitchClarity);
         card->triggerEntryGlow();     // "cooling" neon arrival animation
 
-        // Push slices into the results vault (staggered tile arrival)
-        resultsVault_->addSlices (sharedFile, result.transients, result.classification);
+        // Vault is rebuilt in cards_ order in onAllAnalysisComplete — not here —
+        // so tile 001 always corresponds to pad 1, tile 016 to pad V.
 
         // Wire callbacks that need the loaded data
         card->onExtractClicked = [this, card]
         {
-            if (card->file())
-                renderAndExportCard (*card);
+            if (! card->file()) return;
+            // "Commit" semantic: re-derive natural ends + onset gap clamp from
+            // the current marker positions before exporting, so dragged markers
+            // produce correctly-bounded slices instead of inheriting stale
+            // naturalEnd values that were computed for the original onsets.
+            auto ts = card->transients();
+            switchblade::analysis::finalizeSliceBoundaries (*card->file(), ts);
+            card->setTransients (std::move (ts));
+
+            renderAndExportCard (*card);
+            rebuildVaultFromCards();
         };
 
         card->onMarkerMoved = [this, card] (int, juce::int64)
         {
-            if (card == selectedCard_)
-                previewGrid_->setSource (card->file(), card->transients());
+            // Per spec: a marker drag must immediately re-render the
+            // corresponding slice in the result tiles. We finalise slice
+            // boundaries from the new marker positions on the same card,
+            // then rebuild the vault so the affected tiles update in place.
+            if (card->file())
+            {
+                auto ts = card->transients();
+                switchblade::analysis::finalizeSliceBoundaries (*card->file(), ts);
+                card->setTransients (std::move (ts));
+            }
+            refreshPreviewGrid();
+            rebuildVaultFromCards();
         };
 
+        card->onPlayClicked = [this, card]
+        {
+            if (card->file())
+            {
+                const auto f = card->file();
+                // exclusive=true stops any currently playing voice so each sidebar
+                // play click immediately replaces the previous preview.
+                previewGrid_->playSlice (f, 0,
+                    static_cast<juce::int64> (f->samples.getNumSamples()),
+                    true);
+            }
+        };
+
+        // Algorithm-override dropdown: re-run analysis on this card with a
+        // user-selected mode (e.g. force Melodic for a triangle melody that
+        // the Auto classifier mis-categorised as Percussive).
+        card->onModeChangeRequested = [this, card]
+            (switchblade::analysis::AnalysisMode m) { reAnalyzeCard (card, m); };
+
         const juce::String noteName = result.pitchHz.has_value()
-            ? (" — " + juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
+            ? (juce::String (" ") + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x94"))
+               + " " + juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
                                      *result.pitchHz)))
             : juce::String{};
 
@@ -567,9 +775,62 @@ namespace switchblade::ui
                    + " slices" + noteName
                    + "  |  " + juce::String (cards_.size()) + " loaded");
 
-        // Auto-select if this is the only card
+        // Auto-select if this is the only card; always refresh the full grid
         if (cards_.size() == 1 || selectedCard_ == nullptr)
             selectCard (card);
+        else
+            refreshPreviewGrid();
+    }
+
+    //==========================================================================
+    //  Normalization level management
+    //==========================================================================
+    void MainContainer::setNormTarget (float db)
+    {
+        normTargetDb_ = db;
+        updateNormLabel();
+        for (auto& card : cards_)
+            card->setNormDb (normTargetDb_);
+        if (resultsVault_)
+            resultsVault_->setNormMode (normTargetDb_ < 0.0f);
+    }
+
+    void MainContainer::updateNormLabel() noexcept
+    {
+        const bool on = normTargetDb_ < 0.0f;
+        const juce::String suffix = on
+            ? (" \xe2\x80\xa2 " + juce::String (static_cast<int> (normTargetDb_)) + "dB")
+            : juce::String{};
+        produceBtn_.setButtonText         ("Produce" + suffix);
+        exportSelectionBtn_.setButtonText ("Export Selection" + suffix);
+    }
+
+    //==========================================================================
+    //  Per-card re-analysis (called from badge dropdown on message thread)
+    //==========================================================================
+    void MainContainer::reAnalyzeCard (SampleCard* card,
+                                        switchblade::analysis::AnalysisMode mode)
+    {
+        if (card == nullptr || ! card->file()) return;
+
+        // Remove any stale pending-job entry pointing at this card.
+        for (auto it = pendingCards_.begin(); it != pendingCards_.end(); )
+        {
+            if (it->second == card) it = pendingCards_.erase (it);
+            else ++it;
+        }
+
+        card->setLoading (true);
+        const auto path = card->file()->path;
+        const int jobId = engine_.enqueue (path, mode);
+        pendingCards_.emplace (jobId, card);
+
+        analyzing_ = true;
+        extractAllBtn_.setButtonText (
+            juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
+            + juce::String (pendingCards_.size()) + ")");
+        setStatus (juce::String (path.filename().string())
+                   + juce::String (juce::CharPointer_UTF8 (" \xe2\x80\x94 re-analysing\xe2\x80\xa6")));
     }
 
     //==========================================================================
@@ -580,15 +841,41 @@ namespace switchblade::ui
         analyzing_ = false;
         extractAllBtn_.setButtonText ("Extract All");
 
-        // Trigger the vault completion ceremony (stamp + export bar slide-in)
+        // Rebuild vault in cards_ (drop) order so tile indices always match
+        // grid pad indices: tile 001 = pad 1 (key "1"), tile 016 = pad V (key "V").
         if (resultsVault_)
+        {
+            resultsVault_->clear();
+            for (const auto& card : cards_)
+            {
+                if (! card->file() || card->transients().empty()) continue;
+
+                juce::String noteName;
+                if (card->classification() == switchblade::analysis::SourceClass::Melodic
+                    && card->pitchHz().has_value()
+                    && card->pitchClarity().value_or (0.0f) > 0.5f)
+                {
+                    noteName = juce::String (
+                        switchblade::analysis::PitchDetector::noteNameFromHz (
+                            *card->pitchHz()));
+                }
+                resultsVault_->addSlices (card->file(), card->transients(),
+                                          card->classification(), noteName);
+            }
             resultsVault_->triggerCompletionCeremony();
+        }
+
+        // Multi-selection set was implicitly reset; sync the top-bar counter.
+        updateSelectionCount();
+        refreshPreviewGrid();
 
         const int totalCards  = static_cast<int> (cards_.size());
-        const int totalSlices = resultsVault_ ? resultsVault_->tileCount() : 0;
+        const int totalSlices = resultsVault_ ? resultsVault_->tileCount()
+                                              + resultsVault_->pendingCount() : 0;
 
         setStatus (juce::String (totalCards)  + " file"
-                   + (totalCards  != 1 ? "s" : "") + " ready  \xe2\x80\x94  "
+                   + (totalCards  != 1 ? "s" : "")
+                   + juce::String (juce::CharPointer_UTF8 ("  \xe2\x80\x94  "))
                    + juce::String (totalSlices) + " slice"
                    + (totalSlices != 1 ? "s" : "") + " extracted");
     }
@@ -604,9 +891,7 @@ namespace switchblade::ui
         if (selectedCard_)
         {
             selectedCard_->setSelected (true);
-            if (selectedCard_->file())
-                previewGrid_->setSource (selectedCard_->file(),
-                                         selectedCard_->transients());
+            refreshPreviewGrid();
         }
         else
         {
@@ -640,6 +925,10 @@ namespace switchblade::ui
                 *card.pitchHz()));
         }
 
+        const std::optional<float> pitchHzExport =
+            (card.classification() == switchblade::analysis::SourceClass::Melodic)
+            ? card.pitchHz() : std::optional<float> {};
+
         for (std::size_t i = 0; i < ts.size(); ++i)
         {
             const juce::int64 start = ts[i].sampleIndex;
@@ -650,7 +939,8 @@ namespace switchblade::ui
                 : ((i + 1 < ts.size()) ? ts[i + 1].sampleIndex : len);
             const auto fname = makeSliceFilename (stem, tag, keySuffix,
                                                   static_cast<int> (i + 1));
-            renderSliceToWav (tf, start, std::min (end, len), outDir.getChildFile (fname));
+            renderSliceToWav (tf, start, std::min (end, len),
+                              outDir.getChildFile (fname), pitchHzExport);
         }
         setStatus ("Extracted " + juce::String (ts.size()) + " slices from " + stem);
     }
@@ -658,16 +948,39 @@ namespace switchblade::ui
     void MainContainer::extractAll()
     {
         if (cards_.empty()) { setStatus ("No files loaded."); return; }
+
+        // Match the tile-only selection behaviour in produceAllSlices().
+        const bool anySelected =
+            resultsVault_ && resultsVault_->selectedTileCount() > 0;
+
         int total = 0;
-        for (const auto& c : cards_)
-            total += static_cast<int> (c->transients().size());
-        setStatus ("Extracting " + juce::String (total) + " slices\xe2\x80\xa6");
+        if (anySelected)
+        {
+            total = resultsVault_->selectedTileCount();
+        }
+        else
+        {
+            for (const auto& c : cards_)
+                total += static_cast<int> (c->transients().size());
+        }
+
+        setStatus ("Extracting " + juce::String (total)
+                   + juce::String (juce::CharPointer_UTF8 (" slices\xe2\x80\xa6")));
         produceAllSlices();
     }
 
     void MainContainer::produceAllSlices()
     {
         if (cards_.empty()) { setStatus ("No files loaded."); return; }
+
+        // Selection-aware: if the user has Neon-Gold-selected any vault tiles,
+        // Produce / Extract-All act on that selection only. Sidebar card
+        // multi-select doesn't count (per the spec — only vault tiles are
+        // eligible for Export Selection).
+        const bool anySelected =
+            resultsVault_ && resultsVault_->selectedTileCount() > 0;
+        if (anySelected) { exportSelection(); return; }
+
         int exported = 0;
         for (const auto& card : cards_)
         {
@@ -680,6 +993,10 @@ namespace switchblade::ui
             const auto outDir = juce::File (juce::String (tf.path.parent_path().string()));
             const auto tag    = classificationTag (card->classification());
 
+            const std::optional<float> cardPitchHz =
+                (card->classification() == switchblade::analysis::SourceClass::Melodic)
+                ? card->pitchHz() : std::optional<float> {};
+
             for (std::size_t i = 0; i < ts.size(); ++i)
             {
                 const juce::int64 start = ts[i].sampleIndex;
@@ -687,40 +1004,123 @@ namespace switchblade::ui
                     ? ts[i].naturalEnd
                     : ((i + 1 < ts.size()) ? ts[i + 1].sampleIndex : len);
                 juce::String ks;
-                if (card->classification() == switchblade::analysis::SourceClass::Melodic
-                    && card->pitchHz().has_value())
+                if (cardPitchHz.has_value())
                     ks = juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
-                                       *card->pitchHz()));
+                                       *cardPitchHz));
                 const auto fname = makeSliceFilename (stem, tag, ks, static_cast<int> (i + 1));
-                renderSliceToWav (tf, start, std::min (end, len), outDir.getChildFile (fname));
+                renderSliceToWav (tf, start, std::min (end, len),
+                                  outDir.getChildFile (fname), cardPitchHz);
                 ++exported;
             }
         }
         setStatus (juce::String (exported) + " slices exported.");
     }
 
+    void MainContainer::exportSelection()
+    {
+        int exported = 0;
+
+        // Per spec: only Neon-Gold vault tiles are eligible for Export
+        // Selection. Sidebar SampleCard multi-select is a visual cue only
+        // and does NOT contribute to the export — preventing accidental
+        // bulk exports of an entire file when the user really meant to
+        // grab a few specific slices from the result vault.
+        if (resultsVault_)
+        {
+            resultsVault_->forEachSelectedTile (
+                [this, &exported] (const ResultTile& tile)
+                {
+                    const auto file = tile.file();
+                    if (! file) return;
+
+                    const auto& tf  = *file;
+                    const juce::int64 len   = tf.samples.getNumSamples();
+                    const juce::int64 start = tile.startSample();
+                    const juce::int64 end   = std::min (tile.endSample(), len);
+
+                    const auto stem = juce::File (juce::String (tf.path.string()))
+                                          .getFileNameWithoutExtension();
+                    const auto outDir = juce::File (juce::String (tf.path.parent_path().string()));
+                    const auto tag    = classificationTag (tile.classification());
+
+                    juce::String ks = tile.noteName();
+                    std::optional<float> pitchHz;
+                    if (tile.classification() == switchblade::analysis::SourceClass::Melodic
+                        && ks.isNotEmpty())
+                    {
+                        // Re-derive Hz from note name lookup is overkill; the ACID metadata
+                        // is best-effort here. Caller (analysis) already wrote pitch for
+                        // the file; tile-level export uses the note string only for naming.
+                    }
+                    const auto fname = makeSliceFilename (stem, tag, ks, tile.sliceIndex());
+                    renderSliceToWav (tf, start, end,
+                                      outDir.getChildFile (fname), pitchHz);
+                    ++exported;
+                });
+        }
+
+        if (exported == 0)
+            setStatus ("Nothing selected. Ctrl+click loaded files or vault tiles.");
+        else
+            setStatus (juce::String (exported) + " slice(s) exported from selection.");
+    }
+
     void MainContainer::renderSliceToWav (
         const switchblade::analysis::AudioFile& file,
         juce::int64 start, juce::int64 end,
-        const juce::File& outFile) const
+        const juce::File& outFile,
+        std::optional<float> pitchHz) const
     {
         const int numCh = file.samples.getNumChannels();
         const int numS  = static_cast<int> (end - start);
         if (numS <= 0 || numCh <= 0) return;
 
         const double sr = file.sampleRate;
-        const int fadeSamples = static_cast<int> (std::round (0.005 * sr));
+        // 5ms fade-in for clean attack; 30ms fade-out for professional one-shot tail
+        const int fadeInSamples  = static_cast<int> (std::round (0.005 * sr));
+        const int fadeSamples    = static_cast<int> (std::round (0.030 * sr));
 
         juce::AudioBuffer<float> slice (numCh, numS);
         for (int ch = 0; ch < numCh; ++ch)
             slice.copyFrom (ch, 0, file.samples, ch, static_cast<int> (start), numS);
 
         for (int ch = 0; ch < numCh; ++ch)
-            slice.applyGainRamp (ch, 0, std::min (fadeSamples, numS), 0.0f, 1.0f);
+            slice.applyGainRamp (ch, 0, std::min (fadeInSamples, numS), 0.0f, 1.0f);
 
         const int fadeOutStart = std::max (0, numS - fadeSamples);
         for (int ch = 0; ch < numCh; ++ch)
             slice.applyGainRamp (ch, fadeOutStart, numS - fadeOutStart, 1.0f, 0.0f);
+
+        // Peak normalization — applied after fades so the fade-out doesn't
+        // inflate the gain.  Peak is measured post-fade; target is linear.
+        if (normTargetDb_ < 0.0f)
+        {
+            float peak = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+            {
+                const float* r = slice.getReadPointer (ch);
+                for (int si = 0; si < numS; ++si)
+                    peak = std::max (peak, std::abs (r[si]));
+            }
+            if (peak > 1e-5f)   // skip near-silent slices
+            {
+                const float target = std::pow (10.0f, normTargetDb_ / 20.0f);
+                slice.applyGain (target / peak);
+            }
+        }
+
+        // Build WAV metadata — embed MIDI root note in the ACID chunk so DAWs
+        // (Ableton, Logic, FL Studio, etc.) read the pitch on import.
+        juce::StringPairArray meta;
+        if (pitchHz.has_value() && *pitchHz > 0.0f)
+        {
+            const int midiNote = std::clamp (
+                static_cast<int> (std::round (
+                    69.0f + 12.0f * std::log2f (*pitchHz / 440.0f))),
+                0, 127);
+            meta.set (juce::WavAudioFormat::acidRootSet,  "1");
+            meta.set (juce::WavAudioFormat::acidRootNote, juce::String (midiNote));
+        }
 
         juce::WavAudioFormat wav;
         auto* os = outFile.createOutputStream().release();
@@ -729,7 +1129,7 @@ namespace switchblade::ui
         const auto writer = std::unique_ptr<juce::AudioFormatWriter> (
             wav.createWriterFor (os, sr,
                                  static_cast<unsigned int> (numCh),
-                                 24, {}, 0));
+                                 24, meta, 0));
         if (writer)
             writer->writeFromAudioSampleBuffer (slice, 0, numS);
     }
@@ -737,9 +1137,58 @@ namespace switchblade::ui
     //==========================================================================
     //  Helpers
     //==========================================================================
+    void MainContainer::updateSelectionCount()
+    {
+        // Per spec: the counter reflects only Neon-Gold result tiles
+        // (the 16-pad vault) — sidebar SampleCards don't contribute to
+        // "N selected", so the count always matches the number of WAVs
+        // Export Selection will write for the visible vault.
+        const int n = resultsVault_ ? resultsVault_->selectedTileCount() : 0;
+        selectionCountLabel_.setText (juce::String (n) + " selected",
+                                      juce::dontSendNotification);
+    }
+
+    void MainContainer::rebuildVaultFromCards()
+    {
+        if (! resultsVault_) return;
+
+        resultsVault_->clear();
+        for (const auto& card : cards_)
+        {
+            if (! card->file() || card->transients().empty()) continue;
+
+            juce::String noteName;
+            if (card->classification() == switchblade::analysis::SourceClass::Melodic
+                && card->pitchHz().has_value()
+                && card->pitchClarity().value_or (0.0f) > 0.5f)
+            {
+                noteName = juce::String (
+                    switchblade::analysis::PitchDetector::noteNameFromHz (
+                        *card->pitchHz()));
+            }
+            resultsVault_->addSlices (card->file(), card->transients(),
+                                      card->classification(), noteName);
+        }
+        // Selection set was cleared by clear(); refresh the counter so the
+        // top bar doesn't keep stale state.
+        updateSelectionCount();
+    }
+
+    void MainContainer::refreshPreviewGrid()
+    {
+        std::vector<PreviewGrid::CardData> data;
+        data.reserve (cards_.size());
+        for (const auto& card : cards_)
+        {
+            if (card->file())
+                data.push_back ({ card->file(), card->transients() });
+        }
+        previewGrid_->setAllCards (std::move (data));
+    }
+
     void MainContainer::setStatus (const juce::String& msg)
     {
-        statusLabel_.setText (msg, juce::dontSendNotification);
+        statusLabel_.setText (msg);
     }
 
     switchblade::analysis::AnalysisMode MainContainer::currentMode() const noexcept

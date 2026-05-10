@@ -81,6 +81,10 @@ namespace switchblade::ui
             top-bar "N selected" counter. Only fires for explicit user clicks;
             clear()/rebuild operations do NOT fire it. */
         std::function<void()> onSelectionChanged;
+        /** Fired when the user drags a tile out of the window. The callback
+            receives the initiating tile and is responsible for rendering temp
+            file(s) and calling performExternalDragDropOfFiles. */
+        std::function<void (ResultTile&)> onTileExternalDrag;
 
         //----- Component -------------------------------------------------------
         void paint     (juce::Graphics&) override;

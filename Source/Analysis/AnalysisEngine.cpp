@@ -541,6 +541,9 @@ namespace switchblade::analysis
         : pool_ (juce::jmax (1, numThreads))   // compatible with all JUCE 7.x
     {
         formatManager_.registerBasicFormats();
+       #if JUCE_WINDOWS
+        formatManager_.registerFormat (new juce::WindowsMediaAudioFormat(), false);
+       #endif
     }
 
     AnalysisEngine::~AnalysisEngine()
@@ -608,6 +611,9 @@ namespace switchblade::analysis
     {
         juce::AudioFormatManager fmt;
         fmt.registerBasicFormats();
+       #if JUCE_WINDOWS
+        fmt.registerFormat (new juce::WindowsMediaAudioFormat(), false);
+       #endif
 
         AnalysisResult result;
         result.path          = path;

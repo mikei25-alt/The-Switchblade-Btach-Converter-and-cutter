@@ -1,5 +1,6 @@
 #include "UI/ResultsVault.h"
 #include "Core/Palette.h"
+#include "Analysis/PitchDetector.h"
 
 namespace switchblade::ui
 {
@@ -38,6 +39,8 @@ namespace switchblade::ui
         const juce::int64 totalSamples =
             static_cast<juce::int64> (file->samples.getNumSamples());
 
+        const bool isMelodic = classification == switchblade::analysis::SourceClass::Melodic;
+
         for (std::size_t i = 0; i < transients.size(); ++i)
         {
             const juce::int64 start = transients[i].sampleIndex;
@@ -46,8 +49,21 @@ namespace switchblade::ui
                 : ((i + 1 < transients.size())
                     ? transients[i + 1].sampleIndex
                     : totalSamples);
-            pending_.push_back ({ file, start, std::min (end, totalSamples),
-                                  classification, noteName, nextTileIndex_++ });
+            const juce::int64 endC = std::min (end, totalSamples);
+
+            // Per-slice pitch detection — each tile shows the note its own
+            // audio actually contains, not a single file-wide pitch. Falls
+            // back to the supplied file-wide noteName only if per-slice fails.
+            juce::String thisNote = noteName;
+            if (isMelodic)
+            {
+                if (auto hz = switchblade::analysis::detectSlicePitchHz (*file, start, endC))
+                    thisNote = juce::String (
+                        switchblade::analysis::PitchDetector::noteNameFromHz (*hz));
+            }
+
+            pending_.push_back ({ file, start, endC,
+                                  classification, thisNote, nextTileIndex_++ });
         }
 
         if (! isTimerRunning())
@@ -161,6 +177,10 @@ namespace switchblade::ui
         tile->onMultiSelectChanged = [this]
         {
             if (onSelectionChanged) onSelectionChanged();
+        };
+        tile->onExternalDrag = [this] (ResultTile& t)
+        {
+            if (onTileExternalDrag) onTileExternalDrag (t);
         };
 
         tile->setNormalized (normMode_);

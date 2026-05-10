@@ -201,6 +201,8 @@ namespace switchblade::ui
 
     void ResultTile::mouseDown (const juce::MouseEvent& e)
     {
+        dragStarted_ = false;
+
         // Ctrl+click toggles multi-select for "Export Selection" — checked first
         // so Ctrl+click never fires playback or selection callbacks.
         if (e.mods.isCtrlDown())
@@ -217,6 +219,14 @@ namespace switchblade::ui
         {
             if (onPlay) onPlay (file_, startSample_, endSample_);
         }
+    }
+
+    void ResultTile::mouseDrag (const juce::MouseEvent& e)
+    {
+        if (dragStarted_ || ! onExternalDrag) return;
+        if (e.getDistanceFromDragStart() < 6) return;
+        dragStarted_ = true;
+        onExternalDrag (*this);
     }
 
     //==========================================================================

@@ -122,19 +122,50 @@ namespace switchblade::ui
                                                        bool shouldDrawButtonAsHighlighted,
                                                        bool shouldDrawButtonAsDown)
     {
-        const auto bounds = button.getLocalBounds().toFloat().reduced (1.5f);
-        const float radius = juce::jmin (8.0f, bounds.getHeight() * 0.25f);
+        const auto b = button.getLocalBounds().toFloat().reduced (0.5f);
+        constexpr float radius = 4.0f;
+        const bool isExport = button.getButtonText().startsWith ("Export");
 
-        paintChromeBevel (g, bounds, radius, shouldDrawButtonAsDown);
-
-        // Always-on thin neon rim — every control is "electrified"
-        paintNeonGlow (g, bounds, pal::NeonCyan, 0.22f, radius);
-
-        if (shouldDrawButtonAsHighlighted || button.getToggleState())
+        // Fill gradient — gold tint for Export Selection, flat matte for others
+        if (isExport)
         {
-            const auto neon = button.getToggleState() ? pal::NeonMint : pal::NeonCyan;
-            paintNeonGlow (g, bounds, neon,
-                           shouldDrawButtonAsDown ? 0.6f : 1.0f, radius);
+            const juce::Colour top    = shouldDrawButtonAsDown
+                                      ? juce::Colour (0xFF0C0A00)
+                                      : juce::Colour (0xFF181400);
+            const juce::Colour bottom = shouldDrawButtonAsDown
+                                      ? juce::Colour (0xFF181400)
+                                      : juce::Colour (0xFF0C0A00);
+            g.setGradientFill ({ top, b.getX(), b.getY(),
+                                 bottom, b.getX(), b.getBottom(), false });
+        }
+        else
+        {
+            const juce::Colour top    = shouldDrawButtonAsDown
+                                      ? juce::Colour (0xFF0F0F0F)
+                                      : juce::Colour (0xFF1A1A1A);
+            const juce::Colour bottom = shouldDrawButtonAsDown
+                                      ? juce::Colour (0xFF1A1A1A)
+                                      : juce::Colour (0xFF0F0F0F);
+            g.setGradientFill ({ top, b.getX(), b.getY(),
+                                 bottom, b.getX(), b.getBottom(), false });
+        }
+        g.fillRoundedRectangle (b, radius);
+
+        // Border — cyan on hover, gold for Export at rest, #333 for others at rest
+        if (shouldDrawButtonAsHighlighted)
+            g.setColour (juce::Colour (0xFF00FBFF).withAlpha (0.75f));
+        else if (isExport)
+            g.setColour (pal::NeonGold.withAlpha (0.55f));
+        else
+            g.setColour (juce::Colour (0xFF333333));
+        g.drawRoundedRectangle (b, radius, 1.0f);
+
+        // Hover: thin cyan top accent line
+        if (shouldDrawButtonAsHighlighted && ! shouldDrawButtonAsDown)
+        {
+            g.setColour (juce::Colour (0xFF00FBFF).withAlpha (0.45f));
+            g.drawLine (b.getX() + radius, b.getY() + 0.5f,
+                        b.getRight() - radius, b.getY() + 0.5f, 1.0f);
         }
     }
 
@@ -144,19 +175,10 @@ namespace switchblade::ui
                                                  bool shouldDrawButtonAsDown)
     {
         g.setFont (getTextButtonFont (button, button.getHeight()));
-
-        const auto textColour = button.getToggleState() ? pal::ChromeVoid : pal::TextPrimary;
-
-        // Subtle embossed shadow under letters
-        g.setColour (pal::ChromeVoid.withAlpha (0.55f));
-        g.drawFittedText (button.getButtonText(),
-                          button.getLocalBounds().translated (0, 1),
-                          juce::Justification::centred, 2);
-
-        g.setColour (textColour.withAlpha (shouldDrawButtonAsDown ? 0.85f : 1.0f));
+        g.setColour (pal::TextPrimary.withAlpha (shouldDrawButtonAsDown ? 0.75f : 1.0f));
         g.drawFittedText (button.getButtonText(),
                           button.getLocalBounds(),
-                          juce::Justification::centred, 2);
+                          juce::Justification::centred, 1);
     }
 
     //==========================================================================
@@ -394,16 +416,18 @@ namespace switchblade::ui
     //==========================================================================
     //  Typography
     //==========================================================================
-    juce::Font SwitchbladeLookAndFeel::getTextButtonFont (juce::TextButton&, int buttonHeight)
+    juce::Font SwitchbladeLookAndFeel::getTextButtonFont (juce::TextButton&, int)
     {
-        const float h = juce::jmin (15.0f, static_cast<float> (buttonHeight) * 0.55f);
-        return juce::Font (juce::FontOptions { h }).boldened();
+        return juce::Font (juce::FontOptions { 12.5f }).boldened();
     }
 
     juce::Font SwitchbladeLookAndFeel::getLabelFont (juce::Label& label)
     {
-        return juce::Font (juce::FontOptions {
-            static_cast<float> (label.getHeight()) * 0.6f });
+        // Honor any explicit Label::setFont() call. The default LookAndFeel_V2 also
+        // does this — earlier versions of this LookAndFeel returned a height-based
+        // font, which silently overrode every setFont() in the codebase and caused
+        // tiny header labels to render at ~36pt and clip.
+        return label.getFont();
     }
 
     juce::Font SwitchbladeLookAndFeel::getComboBoxFont (juce::ComboBox& box)

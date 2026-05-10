@@ -1,6 +1,6 @@
 # Switchblade
 
-**v0.4.0** · Art-Deco batch sample converter and intelligent slicer for Windows
+**v0.5.0** · Art-Deco batch sample converter and intelligent slicer for Windows
 
 > *"Brass, Neon, and Heavy Machinery"*
 

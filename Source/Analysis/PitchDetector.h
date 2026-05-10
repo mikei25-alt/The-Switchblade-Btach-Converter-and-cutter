@@ -1,9 +1,13 @@
 #pragma once
 
+#include "AudioFile.h"
+
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace switchblade::analysis
 {
@@ -35,10 +39,11 @@ namespace switchblade::analysis
     public:
         struct Config
         {
-            int   frameSize  { 2048 };    // must be power-of-two
+            int   frameSize  { 4096 };    // larger window for better low-end resolution
             float threshold  { 0.10f };   // typical YIN: 0.1 .. 0.15
             float minHz      {  55.0f };  // A1
             float maxHz      { 2093.0f }; // C7
+            float noiseFloor { 0.0056f }; // ~ -45 dBFS — skip detection below this peak
         };
 
         explicit PitchDetector (Config cfg = {}) noexcept : cfg_ (cfg) {}
@@ -67,6 +72,16 @@ namespace switchblade::analysis
         const int W = std::min (cfg_.frameSize, static_cast<int> (frame.size()));
         if (W < 4)
             return std::nullopt;
+
+        // Noise floor — if the frame is essentially silent, skip pitch detection
+        // entirely. Avoids labelling near-silent slices with spurious low notes.
+        {
+            float peak = 0.0f;
+            for (int i = 0; i < W; ++i)
+                peak = std::max (peak, std::abs (frame[static_cast<std::size_t> (i)]));
+            if (peak < cfg_.noiseFloor)
+                return std::nullopt;
+        }
 
         const int tauMin = static_cast<int> (std::floor (sampleRate / cfg_.maxHz));
         const int tauMax = static_cast<int> (std::ceil  (sampleRate / cfg_.minHz));
@@ -167,5 +182,54 @@ namespace switchblade::analysis
         if (hz <= 0.0f) return 0;
         return static_cast<int> (
             std::round (69.0f + 12.0f * std::log2 (hz / 440.0f)));
+    }
+
+    //==========================================================================
+    //  detectSlicePitchHz — runs YIN on a specific [start, end) region of an
+    //  AudioFile. Skips past the attack into the sustain region for stable
+    //  detection. Returns nullopt for slices that are too short, too quiet,
+    //  or unpitched. Used by both the export pipeline (filename / ACID
+    //  metadata) and the vault display (per-tile note badges).
+    //==========================================================================
+    [[nodiscard]] inline std::optional<float> detectSlicePitchHz (
+        const AudioFile& file,
+        juce::int64 start, juce::int64 end) noexcept
+    {
+        const juce::int64 totalLen = file.samples.getNumSamples();
+        start = std::max<juce::int64> (0, start);
+        end   = std::min (end, totalLen);
+        if (end <= start) return std::nullopt;
+
+        const juce::int64 sliceLen   = end - start;
+        constexpr juce::int64 kMaxFr = 8192;
+        constexpr juce::int64 kMinFr = 1024;
+        if (sliceLen < kMinFr) return std::nullopt;
+
+        // Skip past the attack — start ~10% in (or 256 samples min), capped so
+        // we still have a usable frame remaining in the sustain region.
+        const juce::int64 attack    = std::max<juce::int64> (256, sliceLen / 10);
+        const juce::int64 frameLen  = std::min (kMaxFr, sliceLen - attack);
+        if (frameLen < kMinFr) return std::nullopt;
+        const juce::int64 frameStart = start + attack;
+
+        // Mix to mono for analysis
+        const int numCh = file.samples.getNumChannels();
+        std::vector<float> mono (static_cast<std::size_t> (frameLen));
+        for (juce::int64 i = 0; i < frameLen; ++i)
+        {
+            float sum = 0.0f;
+            for (int c = 0; c < numCh; ++c)
+                sum += file.samples.getSample (c, static_cast<int> (frameStart + i));
+            mono[static_cast<std::size_t> (i)] =
+                sum / static_cast<float> (std::max (1, numCh));
+        }
+
+        PitchDetector::Config cfg;
+        cfg.frameSize = static_cast<int> (frameLen);
+        PitchDetector pd (cfg);
+        const auto pr = pd.detect (std::span<const float> (mono), file.sampleRate);
+        if (pr.has_value() && pr->clarity > 0.5f)
+            return pr->f0Hz;
+        return std::nullopt;
     }
 } // namespace switchblade::analysis

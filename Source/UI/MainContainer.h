@@ -64,32 +64,9 @@ namespace switchblade::ui
             const int h = getHeight();
             if (w <= 0 || h <= 0 || full_.isEmpty()) return;
 
-            auto measure = [this] (const juce::String& s) -> float
-            {
-                juce::GlyphArrangement ga;
-                ga.addLineOfText (font_, s, 0.0f, 0.0f);
-                return ga.getBoundingBox (0, -1, true).getWidth();
-            };
-
-            if (measure (full_) <= static_cast<float> (w))
-            {
-                g.drawText (full_, 0, 0, w, h, just_, false);
-                return;
-            }
-
-            // Binary-truncate from the right until "string…" fits.
-            const juce::String ell = juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa6"));
-            int lo = 0, hi = full_.length();
-            while (lo < hi)
-            {
-                const int mid = (lo + hi + 1) / 2;
-                const auto candidate = full_.substring (0, mid) + ell;
-                if (measure (candidate) <= static_cast<float> (w))
-                    lo = mid;
-                else
-                    hi = mid - 1;
-            }
-            g.drawText (full_.substring (0, lo) + ell, 0, 0, w, h, just_, false);
+            // minimumHorizontalScale = 1.0f — never scale text and never add "…".
+            // If layout is tight, text simply clips. Per UI policy: no truncation glyphs.
+            g.drawFittedText (full_, 0, 0, w, h, just_, 1, 1.0f);
         }
 
     private:
@@ -207,6 +184,9 @@ namespace switchblade::ui
         juce::TextButton   extractAllBtn_      { "Extract All" };
         RightClickButton   produceBtn_         { "Produce" };
         RightClickButton   exportSelectionBtn_ { "Export Selection" };
+        RightClickButton   outputDirBtn_       { "Source folder" };
+        juce::File         outputDir_;                     // empty = same folder as source
+        std::unique_ptr<juce::FileChooser> fileChooser_;  // kept alive across async callback
         float              normTargetDb_       { 0.0f };  // 0 = off, negative = target dBFS
         juce::Label        selectionCountLabel_;   // "N selected" — live count
         EllipsisLabel      statusLabel_;
@@ -240,8 +220,10 @@ namespace switchblade::ui
         void onAllAnalysisComplete();
         void selectCard (SampleCard* card);
         void reAnalyzeCard (SampleCard* card, switchblade::analysis::AnalysisMode mode);
-        void setNormTarget (float db);     // db: 0=off, -1/-3/-6 = target level
-        void updateNormLabel() noexcept;   // refreshes button text + card badges
+        void setNormTarget (float db);           // db: 0=off, -1/-3/-6 = target level
+        void updateNormLabel() noexcept;         // refreshes button text + card badges
+        void chooseOutputDir();                  // opens async folder picker
+        void updateOutputDirLabel() noexcept;    // syncs button text/tooltip to outputDir_
         void renderAndExportCard (SampleCard& card);
         void extractAll();
         void produceAllSlices();

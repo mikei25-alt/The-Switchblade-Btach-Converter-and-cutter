@@ -24,3 +24,8 @@ cmake_install.cmake
 
 # Claude Code
 .claude/
+
+# Graphify outputs
+graphify-out/
+.graphify_python
+.graphify_detect.json

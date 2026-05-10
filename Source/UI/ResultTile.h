@@ -62,10 +62,15 @@ namespace switchblade::ui
         /** Fired after Ctrl+click toggles multiSelected_ — used by the vault
             to bubble up a refresh of the top-bar "N selected" counter. */
         std::function<void()> onMultiSelectChanged;
+        /** Fired when the user drags the tile outside the window. The callback
+            is responsible for rendering temp file(s) and calling
+            performExternalDragDropOfFiles. */
+        std::function<void (ResultTile&)> onExternalDrag;
 
         //----- Component -------------------------------------------------------
         void paint     (juce::Graphics&) override;
         void mouseDown (const juce::MouseEvent&) override;
+        void mouseDrag (const juce::MouseEvent&) override;
 
     private:
         void buildThumbnail();
@@ -88,6 +93,7 @@ namespace switchblade::ui
         bool  multiSelected_ { false };
         bool  normalized_    { false };   // show gold "N" badge when norm export is active
         float entryGlow_     { 0.0f };   // 1 = white-hot, decays to 0 over ~1.2s
+        bool  dragStarted_   { false };  // guard: fire onExternalDrag only once per press
 
         juce::VBlankAttachment vblank_;
 

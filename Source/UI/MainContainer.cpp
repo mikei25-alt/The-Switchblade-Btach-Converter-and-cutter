@@ -181,8 +181,12 @@ namespace switchblade::ui
 
         // std::format portable alternative — avoids MSVC 2019 compatibility risk
         // Filename format:
-        //   Melodic (keySuffix set): [stem]_[Note]_[Index].wav  e.g. SerumLead_C#3_01.wav
+        //   Melodic (keySuffix set): [stem]_[Note(+/-cc c)]_[Index].wav
+        //                            e.g. SerumLead_C#3_01.wav, SerumLead_C#3+12c_02.wav
         //   All other modes:         [stem]_[tag]_[Index].wav   e.g. drums_perc_01.wav
+        // The cents suffix is signed and zero-padded to 2 digits, and is
+        // omitted entirely when the slice is within ±0.5 cents of equal
+        // temperament (keeps in-tune filenames clean).
         // detectSlicePitchHz lives in switchblade::analysis (PitchDetector.h)
         // — used here in three export paths AND inside ResultsVault::addSlices
         // so the per-tile vault badges show the correct per-slice note.
@@ -1039,7 +1043,7 @@ namespace switchblade::ui
                 slicePitchHz = detectSlicePitchHz (tf, start, endC);
                 if (! slicePitchHz.has_value()) slicePitchHz = filePitchHz;
                 if (slicePitchHz.has_value())
-                    keySuffix = juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
+                    keySuffix = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
                         *slicePitchHz));
             }
 
@@ -1119,7 +1123,7 @@ namespace switchblade::ui
                     slicePitchHz = detectSlicePitchHz (tf, start, endC);
                     if (! slicePitchHz.has_value()) slicePitchHz = filePitchHz;
                     if (slicePitchHz.has_value())
-                        ks = juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
+                        ks = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
                                            *slicePitchHz));
                 }
 
@@ -1171,10 +1175,10 @@ namespace switchblade::ui
                     {
                         pitchHz = detectSlicePitchHz (tf, start, end);
                         if (pitchHz.has_value())
-                            ks = juce::String (switchblade::analysis::PitchDetector::noteNameFromHz (
+                            ks = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
                                               *pitchHz));
                         else
-                            ks = tile.noteName();   // fallback
+                            ks = tile.noteName();   // fallback (file-wide note, no cents)
                     }
                     const auto fname = makeSliceFilename (stem, tag, ks, tile.sliceIndex());
                     renderSliceToWav (tf, start, end,

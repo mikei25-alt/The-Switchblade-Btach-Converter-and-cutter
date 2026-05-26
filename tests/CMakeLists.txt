@@ -15,7 +15,8 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 add_executable(SwitchbladeTests
-    analysis_perf_test.cpp)
+    analysis_perf_test.cpp
+    cents_suffix_test.cpp)
 
 target_compile_features(SwitchbladeTests PRIVATE cxx_std_20)
 

@@ -41,7 +41,7 @@ namespace switchblade::analysis
         {
             int   frameSize  { 4096 };    // larger window for better low-end resolution
             float threshold  { 0.10f };   // typical YIN: 0.1 .. 0.15
-            float minHz      {  55.0f };  // A1
+            float minHz      {  40.0f };  // just below E1 (41.2 Hz) — covers 4-string bass low E, upright bass, cello low C
             float maxHz      { 2093.0f }; // C7
             float noiseFloor { 0.0056f }; // ~ -45 dBFS — skip detection below this peak
         };
@@ -57,6 +57,16 @@ namespace switchblade::analysis
 
         /** Return the MIDI note closest to hz (69 = A4 = 440 Hz). */
         [[nodiscard]] static int midiNoteFromHz (float hz) noexcept;
+
+        /** Signed cents deviation from the nearest equal-tempered semitone.
+            Range [-50, +50]. Returns 0 for hz <= 0. */
+        [[nodiscard]] static int centsOffsetFromHz (float hz) noexcept;
+
+        /** Note name with a signed, 2-digit cents suffix, e.g. "A4+12c",
+            "C#3-08c". The suffix is omitted when the offset rounds to zero,
+            so a perfectly-tuned slice still reads as just "C3". Returns "?"
+            for hz <= 0. */
+        [[nodiscard]] static std::string noteNameWithCentsFromHz (float hz) noexcept;
 
     private:
         Config cfg_;
@@ -118,7 +128,10 @@ namespace switchblade::analysis
         int bestTau = -1;
         float bestVal = 1.0f;
 
-        for (int tau = tauMin; tau < searchMax - 1; ++tau)
+        // d[] has size searchMax + 1, so accessing d[tau+1] at tau = searchMax - 1
+        // is still in bounds. The previous bound (searchMax - 1) excluded the two
+        // lowest-frequency candidates, which mattered for material near minHz.
+        for (int tau = tauMin; tau < searchMax; ++tau)
         {
             const float v = d[static_cast<std::size_t> (tau)];
             if (v < cfg_.threshold
@@ -182,6 +195,30 @@ namespace switchblade::analysis
         if (hz <= 0.0f) return 0;
         return static_cast<int> (
             std::round (69.0f + 12.0f * std::log2 (hz / 440.0f)));
+    }
+
+    inline int PitchDetector::centsOffsetFromHz (float hz) noexcept
+    {
+        if (hz <= 0.0f) return 0;
+        const float midiF = 69.0f + 12.0f * std::log2 (hz / 440.0f);
+        const float nearest = std::round (midiF);
+        return static_cast<int> (std::round ((midiF - nearest) * 100.0f));
+    }
+
+    inline std::string PitchDetector::noteNameWithCentsFromHz (float hz) noexcept
+    {
+        std::string note = noteNameFromHz (hz);
+        if (note == "?") return note;
+
+        const int cents = centsOffsetFromHz (hz);
+        if (cents == 0) return note;
+
+        const int abs = std::abs (cents);
+        note.push_back (cents > 0 ? '+' : '-');
+        if (abs < 10) note.push_back ('0');
+        note += std::to_string (abs);
+        note.push_back ('c');
+        return note;
     }
 
     //==========================================================================

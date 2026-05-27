@@ -90,6 +90,10 @@ namespace switchblade::ui
             with the new mode. */
         std::function<void (switchblade::analysis::AnalysisMode)> onModeChangeRequested;
 
+        /** Fired on right-click. The owner decides what to show (typically a
+            "Delete card" / "Delete N selected" popup menu). */
+        std::function<void()> onContextMenuRequested;
+
         //----- Component ------------------------------------------------------
         void paint (juce::Graphics&) override;
         void resized() override;

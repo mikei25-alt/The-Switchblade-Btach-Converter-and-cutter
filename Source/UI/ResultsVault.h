@@ -55,6 +55,16 @@ namespace switchblade::ui
         /** Remove all landed and pending tiles; reset the counter. */
         void clear();
 
+        /** How many tiles (landed + pending) were generated from the given
+            source file. Used by MainContainer to decide whether deleting a
+            card warrants a "what about the slices?" confirmation prompt. */
+        [[nodiscard]] int countSlicesForFile (const AudioFilePtr& file) const noexcept;
+
+        /** Drop every tile (landed and pending) sourced from the given file.
+            Returns the number actually removed. Safe to call with a null
+            pointer (returns 0). */
+        int removeSlicesForFile (const AudioFilePtr& file);
+
         /** Call once the engine signals all-complete.  Stamps a "N SAMPLES READY"
             badge and slides an "EXPORT COLLECTION" bar in from the bottom. */
         void triggerCompletionCeremony();

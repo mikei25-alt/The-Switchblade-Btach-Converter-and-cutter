@@ -84,6 +84,54 @@ namespace switchblade::ui
         repaint();
     }
 
+    int ResultsVault::countSlicesForFile (const AudioFilePtr& file) const noexcept
+    {
+        if (! file) return 0;
+        int n = 0;
+        for (const auto& t : tiles_)
+            if (t && t->file() == file) ++n;
+        for (const auto& p : pending_)
+            if (p.file == file) ++n;
+        return n;
+    }
+
+    int ResultsVault::removeSlicesForFile (const AudioFilePtr& file)
+    {
+        if (! file) return 0;
+
+        int removed = 0;
+
+        // Drop matching landed tiles. We don't renumber the surviving tiles
+        // (nextTileIndex_) — slice numbers reflect order-of-creation, not
+        // position in the vault, and renumbering would invalidate any export
+        // filenames the user might already be looking at.
+        auto it = tiles_.begin();
+        while (it != tiles_.end())
+        {
+            if (*it && (*it)->file() == file)
+            {
+                removeChildComponent (it->get());
+                it = tiles_.erase (it);
+                ++removed;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        const auto before = pending_.size();
+        std::erase_if (pending_, [&] (const PendingSlice& p) { return p.file == file; });
+        removed += static_cast<int> (before - pending_.size());
+
+        if (removed > 0)
+        {
+            relayout();
+            repaint();
+        }
+        return removed;
+    }
+
     void ResultsVault::forEachSelectedTile (std::function<void (const ResultTile&)> fn) const
     {
         if (! fn) return;

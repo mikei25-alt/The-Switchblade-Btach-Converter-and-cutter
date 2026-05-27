@@ -548,6 +548,14 @@ namespace switchblade::ui
     {
         const auto p = e.position;
 
+        // Right-click → defer to owner (context menu lives in MainContainer
+        // because deletion needs access to the cards collection and the vault).
+        if (e.mods.isPopupMenu())
+        {
+            if (onContextMenuRequested) onContextMenuRequested();
+            return;
+        }
+
         // Play button takes priority — fires before marker / selection logic
         if (file_ && playBtnBounds().toFloat().contains (p))
         {

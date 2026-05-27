@@ -10,6 +10,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+#include <algorithm>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -120,6 +121,17 @@ namespace switchblade::ui
             relayout();
         }
 
+        /** Detach a card from the list. Does NOT delete the card —
+            ownership stays with MainContainer::cards_. */
+        void removeCard (SampleCard* card)
+        {
+            if (card == nullptr) return;
+            removeChildComponent (card);
+            cards_.erase (std::remove (cards_.begin(), cards_.end(), card),
+                          cards_.end());
+            relayout();
+        }
+
         void setViewportWidth (int w) { viewW_ = w; relayout(); }
 
         void relayout()
@@ -158,6 +170,7 @@ namespace switchblade::ui
         void paint (juce::Graphics&) override;
         void resized() override;
         void mouseDown (const juce::MouseEvent&) override;
+        bool keyPressed (const juce::KeyPress&) override;
 
         //----- FileDragAndDropTarget ------------------------------------------
         bool isInterestedInFileDrag (const juce::StringArray& files) override;
@@ -227,6 +240,25 @@ namespace switchblade::ui
         void renderAndExportCard (SampleCard& card);
         void extractAll();
         void produceAllSlices();
+
+        //----- Card deletion --------------------------------------------------
+        /** Right-click on a card: show a PopupMenu with "Delete card" or
+            "Delete N selected cards", then dispatch to requestDeleteCards. */
+        void showCardContextMenu (SampleCard* clickedCard);
+        /** Entry point: show context menu (or skip straight to delete when the
+            user has previously chosen "Don't ask me again"). */
+        void requestDeleteCards (std::vector<SampleCard*> targets);
+        /** Actual removal — detaches from CardListComponent, drops from
+            cards_, optionally calls ResultsVault::removeSlicesForFile. */
+        void deleteCards (const std::vector<SampleCard*>& targets,
+                          bool alsoDeleteSlices);
+        /** Lazy accessor for the persisted "Don't ask me again" preference. */
+        juce::PropertiesFile& userSettings();
+
+        std::unique_ptr<juce::PropertiesFile> userSettings_;
+        // Kept alive across the async modal callback — same pattern as fileChooser_.
+        std::unique_ptr<juce::AlertWindow>    deletePrompt_;
+        std::unique_ptr<juce::ToggleButton>   deletePromptRemember_;
         void renderSliceToWav (const switchblade::analysis::AudioFile& file,
                                juce::int64 start, juce::int64 end,
                                const juce::File& outFile,

@@ -41,7 +41,8 @@ namespace switchblade::analysis
         {
             int   frameSize  { 4096 };    // larger window for better low-end resolution
             float threshold  { 0.10f };   // typical YIN: 0.1 .. 0.15
-            float minHz      {  40.0f };  // just below E1 (41.2 Hz) — covers 4-string bass low E, upright bass, cello low C
+            float minHz      {  55.0f };  // A1 — kept tight so the file-wide scans (small frames) stay fast.
+                                          // detectSlicePitchHz overrides this locally for bass-friendly per-slice labeling.
             float maxHz      { 2093.0f }; // C7
             float noiseFloor { 0.0056f }; // ~ -45 dBFS — skip detection below this peak
         };
@@ -263,6 +264,11 @@ namespace switchblade::analysis
 
         PitchDetector::Config cfg;
         cfg.frameSize = static_cast<int> (frameLen);
+        // Per-slice path uses a much larger frame (up to 8192), which has
+        // enough cycles to resolve sub-55 Hz fundamentals — bass low E
+        // (41 Hz), upright bass, sub-bass synths. Widening minHz here only
+        // costs us cycles where the resolution genuinely warrants it.
+        cfg.minHz = 30.0f;
         PitchDetector pd (cfg);
         const auto pr = pd.detect (std::span<const float> (mono), file.sampleRate);
         if (pr.has_value() && pr->clarity > 0.5f)

@@ -156,6 +156,36 @@ namespace switchblade::ui
 
     namespace
     {
+        //==========================================================================
+        //  SimpleCheckbox — paints only the indicator box. The accompanying
+        //  text label is provided by AlertWindow itself (it auto-renders each
+        //  custom component's getName() 14 px above the component, in the
+        //  dialog's standard label font), so painting our own text here would
+        //  just duplicate it.
+        //==========================================================================
+        class SimpleCheckbox final : public juce::ToggleButton
+        {
+        public:
+            using juce::ToggleButton::ToggleButton;
+
+            void paintButton (juce::Graphics& g, bool isOver, bool /*isDown*/) override
+            {
+                const auto bounds = getLocalBounds().toFloat();
+                constexpr float kBox = 14.0f;
+                const juce::Rectangle<float> box {
+                    0.0f, (bounds.getHeight() - kBox) * 0.5f, kBox, kBox };
+
+                g.setColour (juce::Colours::white.withAlpha (isOver ? 0.95f : 0.70f));
+                g.drawRoundedRectangle (box, 2.0f, 1.2f);
+
+                if (getToggleState())
+                {
+                    g.setColour (juce::Colour (0xFF00C8FF));   // Switchblade cyan
+                    g.fillRoundedRectangle (box.reduced (3.0f), 1.5f);
+                }
+            }
+        };
+
         constexpr int kTopBarH      = 80;
         constexpr int kBrandWidth   = 235;   // left brand area: logo (50) + 15 gap + wordmark (~170)
         constexpr int kHeaderPadX   = 20;    // outer L/R padding so content doesn't choke window edge
@@ -662,6 +692,8 @@ namespace switchblade::ui
             card->onMultiSelectChanged = [this] { updateSelectionCount(); };
             card->onModeChangeRequested = [this, rawCard = card.get()]
                 (switchblade::analysis::AnalysisMode m) { reAnalyzeCard (rawCard, m); };
+            card->onContextMenuRequested = [this, rawCard = card.get()]
+                { showCardContextMenu (rawCard); };
             card->setNormDb (normTargetDb_);
 
             SampleCard* raw = card.get();
@@ -759,6 +791,7 @@ namespace switchblade::ui
             cards_.push_back (std::move (newCard));
             card->onSelected = [this, card] { selectCard (card); };
             card->onMultiSelectChanged = [this] { updateSelectionCount(); };
+            card->onContextMenuRequested = [this, card] { showCardContextMenu (card); };
         }
 
         // Populate
@@ -1001,6 +1034,190 @@ namespace switchblade::ui
         {
             previewGrid_->clear();
         }
+    }
+
+    //==========================================================================
+    //  Card deletion
+    //==========================================================================
+    juce::PropertiesFile& MainContainer::userSettings()
+    {
+        if (! userSettings_)
+        {
+            juce::PropertiesFile::Options opts;
+            opts.applicationName     = "Switchblade";
+            opts.filenameSuffix      = ".settings";
+            opts.osxLibrarySubFolder = "Application Support";
+            opts.commonToAllUsers    = false;
+            opts.storageFormat       = juce::PropertiesFile::storeAsXML;
+            userSettings_ = std::make_unique<juce::PropertiesFile> (opts);
+        }
+        return *userSettings_;
+    }
+
+    bool MainContainer::keyPressed (const juce::KeyPress& k)
+    {
+        if (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey)
+        {
+            // Build target list from the multi-selection; fall back to the
+            // single highlighted card if nothing is multi-selected.
+            std::vector<SampleCard*> targets;
+            for (auto& c : cards_)
+                if (c && c->isMultiSelected()) targets.push_back (c.get());
+            if (targets.empty() && selectedCard_)
+                targets.push_back (selectedCard_);
+
+            if (! targets.empty())
+            {
+                requestDeleteCards (std::move (targets));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void MainContainer::showCardContextMenu (SampleCard* clickedCard)
+    {
+        if (clickedCard == nullptr) return;
+
+        // If the clicked card is part of the multi-selection, the menu acts
+        // on the whole set; otherwise it acts on just this one card.
+        std::vector<SampleCard*> targets;
+        for (auto& c : cards_)
+            if (c && c->isMultiSelected()) targets.push_back (c.get());
+
+        const bool clickedIsMulti = std::find (targets.begin(), targets.end(), clickedCard)
+                                  != targets.end();
+        if (! clickedIsMulti || targets.size() < 2)
+            targets = { clickedCard };
+
+        const int n = static_cast<int> (targets.size());
+        juce::PopupMenu menu;
+        menu.addItem (1, n == 1 ? juce::String ("Delete card")
+                                : "Delete " + juce::String (n) + " selected cards");
+
+        menu.showMenuAsync (
+            juce::PopupMenu::Options{}.withTargetComponent (clickedCard),
+            [this, targets = std::move (targets)] (int result) mutable
+            {
+                if (result == 1)
+                    requestDeleteCards (std::move (targets));
+            });
+    }
+
+    void MainContainer::requestDeleteCards (std::vector<SampleCard*> targets)
+    {
+        if (targets.empty()) return;
+
+        // Count vault slices that came from these cards. If none, just delete
+        // silently — there's nothing the user could lose by skipping the prompt.
+        int sliceCount = 0;
+        for (auto* c : targets)
+            if (c && c->file())
+                sliceCount += resultsVault_->countSlicesForFile (c->file());
+
+        if (sliceCount == 0)
+        {
+            deleteCards (targets, /*alsoDeleteSlices=*/ false);
+            return;
+        }
+
+        // Persisted "Don't ask me again" preference takes the prompt out of the loop.
+        const juce::String pref = userSettings().getValue ("deleteCardsAction", "prompt");
+        if (pref == "deleteAll")  { deleteCards (targets, true);  return; }
+        if (pref == "keepSlices") { deleteCards (targets, false); return; }
+
+        // Build the three-button modal with a "Don't ask me again" toggle.
+        // The AlertWindow and ToggleButton are held as members (same pattern
+        // as fileChooser_) so they survive across the async callback.
+        const juce::String title = targets.size() == 1
+            ? juce::String ("Delete card?")
+            : "Delete " + juce::String (targets.size()) + " cards?";
+        const juce::String msg =
+            juce::String (sliceCount) + " generated slice(s) in the Vault came from "
+            + (targets.size() == 1 ? juce::String ("this card.")
+                                   : juce::String ("these cards."))
+            + "\n\nWhat should happen to them?";
+
+        deletePrompt_ = std::make_unique<juce::AlertWindow> (
+            title, msg, juce::MessageBoxIconType::QuestionIcon);
+
+        deletePromptRemember_ = std::make_unique<SimpleCheckbox> ("Don't ask me again");
+        deletePromptRemember_->setSize (170, 20);
+        deletePrompt_->addCustomComponent (deletePromptRemember_.get());
+
+        deletePrompt_->addButton ("Delete cards + slices", 1,
+                                  juce::KeyPress (juce::KeyPress::returnKey));
+        deletePrompt_->addButton ("Delete cards only",     2);
+        deletePrompt_->addButton ("Cancel",                0,
+                                  juce::KeyPress (juce::KeyPress::escapeKey));
+
+        deletePrompt_->enterModalState (true,
+            juce::ModalCallbackFunction::create (
+                [this, targets = std::move (targets)] (int result) mutable
+                {
+                    const bool persist = deletePromptRemember_
+                                       && deletePromptRemember_->getToggleState();
+                    // Tear down the modal owners *before* mutating state, so a
+                    // re-entrant delete can spin up a fresh prompt cleanly.
+                    deletePromptRemember_.reset();
+                    deletePrompt_.reset();
+
+                    if (result == 0) return;   // Cancel
+
+                    const bool deleteSlices = (result == 1);
+                    if (persist)
+                    {
+                        userSettings().setValue ("deleteCardsAction",
+                            deleteSlices ? "deleteAll" : "keepSlices");
+                        userSettings().saveIfNeeded();
+                    }
+                    deleteCards (targets, deleteSlices);
+                }),
+            false);
+    }
+
+    void MainContainer::deleteCards (const std::vector<SampleCard*>& targets,
+                                     bool alsoDeleteSlices)
+    {
+        if (targets.empty()) return;
+
+        for (auto* target : targets)
+        {
+            if (target == nullptr) continue;
+
+            // Drop any in-flight analysis job pointing at this card so its
+            // result doesn't try to populate a destroyed component.
+            for (auto it = pendingCards_.begin(); it != pendingCards_.end(); )
+            {
+                if (it->second == target) it = pendingCards_.erase (it);
+                else                      ++it;
+            }
+
+            // Vault tiles, optionally.
+            if (alsoDeleteSlices && target->file())
+                resultsVault_->removeSlicesForFile (target->file());
+
+            // Clear selection if this was the previewed card.
+            if (selectedCard_ == target)
+                selectedCard_ = nullptr;
+
+            cardList_->removeCard (target);
+
+            cards_.erase (
+                std::remove_if (cards_.begin(), cards_.end(),
+                                [target] (const std::unique_ptr<SampleCard>& p)
+                                { return p.get() == target; }),
+                cards_.end());
+        }
+
+        // Re-elect a selected card if we just orphaned the preview grid.
+        if (selectedCard_ == nullptr && ! cards_.empty())
+            selectCard (cards_.front().get());
+        else if (cards_.empty())
+            previewGrid_->clear();
+
+        updateSelectionCount();
+        repaint();
     }
 
     //==========================================================================

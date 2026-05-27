@@ -241,6 +241,9 @@ namespace switchblade::ui
         void extractAll();
         void produceAllSlices();
 
+        //----- Drag a card's source file out to the OS / DAW ------------------
+        void dragOutCard (SampleCard* card);
+
         //----- Card deletion --------------------------------------------------
         /** Right-click on a card: show a PopupMenu with "Delete card" or
             "Delete N selected cards", then dispatch to requestDeleteCards. */

@@ -240,6 +240,61 @@ namespace switchblade::ui
             ss << index << ".wav";
             return juce::String (ss.str());
         }
+
+        //----- Drag-to-DAW temp file plumbing ----------------------------------
+        // All drag-out renders go into a dedicated subdir of the OS temp folder
+        // so we can sweep stale files cleanly at startup (and never accidentally
+        // delete unrelated temp files in the broader %TEMP% directory).
+        [[nodiscard]] juce::File tempDragDir()
+        {
+            auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                          .getChildFile ("Switchblade");
+            dir.createDirectory();
+            return dir;
+        }
+
+        // Filename for a drag-out temp render — mirrors the export-pipeline
+        // naming exactly (cents-aware for melodic slices) so the clip name
+        // that lands in the DAW is the meaningful one. pitchHz is returned
+        // so the caller can forward it to renderSliceToWav for any pitch-
+        // dependent processing (currently unused, but kept symmetrical with
+        // the export path).
+        struct TileRenderName
+        {
+            juce::String         filename;
+            std::optional<float> pitchHz;
+        };
+
+        [[nodiscard]] TileRenderName buildTileFilename (const ResultTile& tile)
+        {
+            TileRenderName out;
+            if (! tile.file()) return out;
+
+            const auto& tf  = *tile.file();
+            const juce::int64 totalLen = tf.samples.getNumSamples();
+            const juce::int64 start    = tile.startSample();
+            const juce::int64 end      = std::min (tile.endSample(), totalLen);
+            if (end <= start) return out;
+
+            const auto stem = juce::File (juce::String (tf.path.string()))
+                                 .getFileNameWithoutExtension();
+            const auto tag  = classificationTag (tile.classification());
+
+            juce::String keySuffix;
+            if (tile.classification() == switchblade::analysis::SourceClass::Melodic)
+            {
+                out.pitchHz = detectSlicePitchHz (tf, start, end);
+                if (out.pitchHz.has_value())
+                    keySuffix = juce::String (
+                        switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
+                            *out.pitchHz));
+                else
+                    keySuffix = tile.noteName();   // fallback (file-wide note, no cents)
+            }
+
+            out.filename = makeSliceFilename (stem, tag, keySuffix, tile.sliceIndex());
+            return out;
+        }
     } // namespace
 
     //==========================================================================
@@ -248,6 +303,16 @@ namespace switchblade::ui
     MainContainer::MainContainer()
     {
         setWantsKeyboardFocus (true);
+
+        // Sweep any drag-out temp files left behind by a previous crash or
+        // unclean shutdown. Per-drag cleanup also runs via the JUCE drag
+        // callback, but this is the safety net for the not-so-happy path.
+        {
+            auto dir = tempDragDir();
+            for (auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.wav"))
+                f.deleteFile();
+        }
+
         formatManager_.registerBasicFormats();
        #if JUCE_WINDOWS
         formatManager_.registerFormat (new juce::WindowsMediaAudioFormat(), false);
@@ -389,9 +454,20 @@ namespace switchblade::ui
                 const juce::int64 end = std::min (t.endSample(), len);
                 if (end <= t.startSample()) return;
 
-                const auto tmp = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                    .getChildFile ("sb_drag_" + juce::String (t.sliceIndex()) + ".wav");
-                renderSliceToWav (tf, t.startSample(), end, tmp);
+                // Mirror the export pipeline's naming so the clip name the DAW
+                // imports carries the analysed pitch (e.g. Bass_E1+12c_03.wav).
+                const auto named = buildTileFilename (t);
+                const juce::String fname = named.filename.isNotEmpty()
+                    ? named.filename
+                    : ("sb_drag_" + juce::String (t.sliceIndex()) + ".wav");
+
+                // Disambiguate collisions when two cards share the same stem +
+                // slice index (rare but possible after re-analysis).
+                auto tmp = tempDragDir().getChildFile (fname);
+                if (tmp.existsAsFile())
+                    tmp = tmp.getNonexistentSibling (false);
+
+                renderSliceToWav (tf, t.startSample(), end, tmp, named.pitchHz);
                 if (tmp.existsAsFile())
                 {
                     paths.add (tmp.getFullPathName());
@@ -694,6 +770,7 @@ namespace switchblade::ui
                 (switchblade::analysis::AnalysisMode m) { reAnalyzeCard (rawCard, m); };
             card->onContextMenuRequested = [this, rawCard = card.get()]
                 { showCardContextMenu (rawCard); };
+            card->onDragOut = [this, rawCard = card.get()] { dragOutCard (rawCard); };
             card->setNormDb (normTargetDb_);
 
             SampleCard* raw = card.get();
@@ -792,6 +869,7 @@ namespace switchblade::ui
             card->onSelected = [this, card] { selectCard (card); };
             card->onMultiSelectChanged = [this] { updateSelectionCount(); };
             card->onContextMenuRequested = [this, card] { showCardContextMenu (card); };
+            card->onDragOut = [this, card] { dragOutCard (card); };
         }
 
         // Populate
@@ -1034,6 +1112,28 @@ namespace switchblade::ui
         {
             previewGrid_->clear();
         }
+    }
+
+    //==========================================================================
+    //  Drag a card's source file out to the OS / DAW
+    //==========================================================================
+    void MainContainer::dragOutCard (SampleCard* card)
+    {
+        if (card == nullptr || ! card->file()) return;
+
+        const auto path = juce::String (card->file()->path.string());
+        if (path.isEmpty()) return;
+
+        juce::File f (path);
+        if (! f.existsAsFile()) return;   // file moved or deleted under us
+
+        juce::StringArray paths;
+        paths.add (f.getFullPathName());
+
+        // canMoveFiles = false: never let a DAW take ownership of the user's
+        // original source. The OS does a copy-on-import for safety.
+        juce::DragAndDropContainer::performExternalDragDropOfFiles (
+            paths, false, card);
     }
 
     //==========================================================================

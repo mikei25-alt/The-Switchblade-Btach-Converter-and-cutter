@@ -94,6 +94,12 @@ namespace switchblade::ui
             "Delete card" / "Delete N selected" popup menu). */
         std::function<void()> onContextMenuRequested;
 
+        /** Fired when the user drags this card past a small threshold without
+            having hit a marker or initiated a waveform pan. The owner is
+            responsible for handing the source file's path to the OS via
+            juce::DragAndDropContainer::performExternalDragDropOfFiles. */
+        std::function<void()> onDragOut;
+
         //----- Component ------------------------------------------------------
         void paint (juce::Graphics&) override;
         void resized() override;
@@ -141,6 +147,7 @@ namespace switchblade::ui
         float liftPhase_   { 0.0f };   // 0 = resting, 1 = fully lifted
         float entryGlow_   { 0.0f };   // 1 = white-hot arrival, decays to 0
         int   draggingIdx_ { -1 };
+        bool  dragOutFired_ { false };   // latches per gesture so onDragOut fires once
         std::filesystem::path displayPath_;  // shown before file_ is set
         // Badge hit area — set in paintHeader (const, so mutable), read in mouseDown.
         mutable juce::Rectangle<int> badgeBounds_;

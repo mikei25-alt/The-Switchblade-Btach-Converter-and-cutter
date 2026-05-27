@@ -548,6 +548,9 @@ namespace switchblade::ui
     {
         const auto p = e.position;
 
+        // Reset the per-gesture drag-out latch so subsequent drags can fire it.
+        dragOutFired_ = false;
+
         // Right-click → defer to owner (context menu lives in MainContainer
         // because deletion needs access to the cards collection and the vault).
         if (e.mods.isPopupMenu())
@@ -625,6 +628,22 @@ namespace switchblade::ui
 
     void SampleCard::mouseDrag (const juce::MouseEvent& e)
     {
+        // ── Drag-out to DAW ────────────────────────────────────────────────────
+        // Fires once per gesture, only when we're not already busy with another
+        // drag interaction (marker nudge or pan). 8 px threshold matches the
+        // OS-typical click-vs-drag boundary while still feeling responsive.
+        if (! dragOutFired_
+            && draggingIdx_ < 0
+            && ! isPanning_
+            && file_
+            && onDragOut
+            && e.getDistanceFromDragStart() >= 8)
+        {
+            dragOutFired_ = true;
+            onDragOut();
+            return;
+        }
+
         // ── Pan (waveform background drag when zoomed) ─────────────────────────
         if (isPanning_ && draggingIdx_ < 0)
         {

@@ -244,6 +244,13 @@ namespace switchblade::ui
         //----- Drag a card's source file out to the OS / DAW ------------------
         void dragOutCard (SampleCard* card);
 
+        //----- Sensitivity / Division slider context switch -------------------
+        // When Grid mode is selected the slider's range, value, and label
+        // change to drive the engine's gridDivisions count instead of the
+        // transient detector's sensitivity.
+        void applyModeSliderConfig();
+        bool sliderInGridMode_ { false };
+
         //----- Card deletion --------------------------------------------------
         /** Right-click on a card: show a PopupMenu with "Delete card" or
             "Delete N selected cards", then dispatch to requestDeleteCards. */

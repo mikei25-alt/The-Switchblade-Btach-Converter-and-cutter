@@ -584,6 +584,7 @@ namespace switchblade::ui
             menu.addItem (2, "Percussive");
             menu.addItem (3, "Melodic");
             menu.addItem (4, "Texture");
+            menu.addItem (5, "Grid");
 
             const auto screenArea = localAreaToGlobal (badgeBounds_);
             menu.showMenuAsync (
@@ -593,8 +594,9 @@ namespace switchblade::ui
                 [this] (int result)
                 {
                     if (result <= 0 || ! onModeChangeRequested) return;
-                    constexpr std::array<M, 4> kModes { M::Auto, M::Percussive,
-                                                        M::Melodic, M::Texture };
+                    constexpr std::array<M, 5> kModes { M::Auto, M::Percussive,
+                                                        M::Melodic, M::Texture,
+                                                        M::Grid };
                     onModeChangeRequested (kModes[static_cast<std::size_t> (result - 1)]);
                 });
             return;
@@ -764,6 +766,7 @@ namespace switchblade::ui
             case C::Percussive: return "PERCUSSIVE";
             case C::Melodic:    return "MELODIC";
             case C::Texture:    return "TEXTURE";
+            case C::Grid:       return "GRID";
             case C::Unknown:
             default:            return "UNKNOWN";
         }
@@ -777,6 +780,7 @@ namespace switchblade::ui
             case C::Percussive: return pal::NeonGold;
             case C::Melodic:    return pal::NeonMagenta;
             case C::Texture:    return pal::NeonMint;
+            case C::Grid:       return pal::NeonCyan;
             case C::Unknown:
             default:            return pal::TextSecondary;
         }

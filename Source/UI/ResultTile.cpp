@@ -250,6 +250,7 @@ namespace switchblade::ui
             case C::Percussive: return "PERC";
             case C::Melodic:    return "MEL";
             case C::Texture:    return "TEX";
+            case C::Grid:       return "GRID";
             default:            return "---";
         }
     }
@@ -262,6 +263,7 @@ namespace switchblade::ui
             case C::Percussive: return pal::NeonCyan;
             case C::Melodic:    return pal::NeonGold;
             case C::Texture:    return pal::NeonMint;
+            case C::Grid:       return pal::NeonCyan;   // matches SampleCard Grid badge
             default:            return pal::TextSecondary;
         }
     }

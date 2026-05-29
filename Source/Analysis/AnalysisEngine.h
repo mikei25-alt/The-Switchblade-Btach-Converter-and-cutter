@@ -49,7 +49,8 @@ namespace switchblade::analysis
         Auto,         // classifier picks (YAMNet hookup lands in Phase B+)
         Percussive,   // force Transient Detector
         Melodic,      // force Transient Detector + pitch estimation
-        Texture       // force Spectral Stability / RMS scanner
+        Texture,      // force Spectral Stability / RMS scanner
+        Grid          // equal-division — N zero-crossing-snapped boundaries
     };
 
     enum class SourceClass
@@ -57,8 +58,17 @@ namespace switchblade::analysis
         Unknown,
         Percussive,
         Melodic,
-        Texture
+        Texture,
+        Grid
     };
+
+    // Single source of truth: which source classes carry useful pitch info.
+    // Melodic obviously does; Grid does too because grid-sliced material is
+    // often a tonal loop and per-slice cents-aware filenames are desired.
+    [[nodiscard]] constexpr bool wantsPitch (SourceClass c) noexcept
+    {
+        return c == SourceClass::Melodic || c == SourceClass::Grid;
+    }
 
     struct AnalysisResult
     {
@@ -101,6 +111,10 @@ namespace switchblade::analysis
         /** Set detector parameters for subsequently-enqueued files. */
         void setDetectorParams (TransientDetector::Params p);
 
+        /** Set the number of equal-length divisions used by AnalysisMode::Grid.
+            Clamped to [2, 64] (matches the project's Slice Count Ceiling). */
+        void setGridDivisions (int n);
+
         /** Called on the message thread when a job begins (before DSP runs). */
         void setOnStarted  (StartedCallback cb);
 
@@ -134,6 +148,7 @@ namespace switchblade::analysis
         juce::AudioFormatManager        formatManager_;
         juce::ThreadPool                pool_;
         TransientDetector::Params       detectorParams_;
+        std::atomic<int>                gridDivisions_   { 16 };  // for AnalysisMode::Grid
         StartedCallback                 onStarted_;
         CompletionCallback              onComplete_;
         AllCompleteCallback             onAllComplete_;

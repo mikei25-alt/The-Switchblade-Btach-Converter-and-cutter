@@ -1,5 +1,6 @@
 #include "PreviewGrid.h"
 #include "Core/Palette.h"
+#include "Analysis/SliceFades.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,7 +71,12 @@ namespace switchblade::ui
 
             const auto& src   = v.file->samples;
             const int numSrc  = src.getNumChannels();
-            const int numFade = static_cast<int> (std::round (0.005 * deviceSampleRate_));
+
+            // Shared fade profile — see Analysis/SliceFades.h. This must match
+            // renderSliceToWav exactly so the in-app preview sounds identical
+            // to what the user gets on export / drag-to-DAW.
+            const int sliceLen = static_cast<int> (v.end - v.start);
+            const auto fades   = switchblade::analysis::sliceFades (sliceLen, deviceSampleRate_);
 
             int written = 0;
             while (written < needed && v.active)
@@ -91,14 +97,15 @@ namespace switchblade::ui
                     for (int i = 0; i < canWrite; ++i)
                     {
                         float gain = 1.0f;
-                        // 5 ms fade-in from slice start
                         const juce::int64 fromStart = (v.playhead + i) - v.start;
-                        if (fromStart < numFade)
-                            gain = static_cast<float> (fromStart) / static_cast<float> (numFade);
-                        // 5 ms fade-out before slice end
+                        if (fades.fadeInSamples > 0 && fromStart < fades.fadeInSamples)
+                            gain = static_cast<float> (fromStart)
+                                 / static_cast<float> (fades.fadeInSamples);
+
                         const juce::int64 fromEnd = v.end - (v.playhead + i);
-                        if (fromEnd < numFade)
-                            gain *= static_cast<float> (fromEnd) / static_cast<float> (numFade);
+                        if (fades.fadeOutSamples > 0 && fromEnd <= fades.fadeOutSamples)
+                            gain *= static_cast<float> (fromEnd)
+                                  / static_cast<float> (fades.fadeOutSamples);
 
                         w[i] += r[i] * gain;
                     }

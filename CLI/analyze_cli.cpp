@@ -37,7 +37,7 @@ namespace
             "  switchblade-analyze <in.wav> [out.json] [options]\n"
             "\n"
             "Options:\n"
-            "  --mode=<auto|percussive|melodic|texture>   (default: auto)\n"
+            "  --mode=<auto|percussive|melodic|texture|grid>   (default: auto)\n"
             "  --sensitivity=<float>                      detector gain (0.3..3.0, default 1.0)\n"
             "  --min-spacing=<ms>                         minimum onset spacing (default 40)\n"
             "  --snap=<ms>                                zero-cross snap radius (default 5)\n"
@@ -63,6 +63,7 @@ namespace
         if (v == "percussive")  return AnalysisMode::Percussive;
         if (v == "melodic")     return AnalysisMode::Melodic;
         if (v == "texture")     return AnalysisMode::Texture;
+        if (v == "grid")        return AnalysisMode::Grid;
         return std::nullopt;
     }
 

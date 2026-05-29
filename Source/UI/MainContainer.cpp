@@ -1,7 +1,9 @@
 #include "MainContainer.h"
 #include "Core/Palette.h"
+#include "Analysis/BwavMeta.h"
 #include "Analysis/PitchDetector.h"
 #include "Analysis/SliceBoundary.h"
+#include "Analysis/SliceFades.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 
@@ -192,8 +194,8 @@ namespace switchblade::ui
         constexpr int kGridFrac     = 30;
         constexpr int kPreviewGridH = 300;   // fixed height for the 4x4 pad grid
 
-        constexpr std::array<const char*, 4> kModeNames {
-            "Auto", "Percussive", "Melodic", "Texture"
+        constexpr std::array<const char*, 5> kModeNames {
+            "Auto", "Percussive", "Melodic", "Texture", "Grid"
         };
 
         [[nodiscard]] const char* classificationTag (
@@ -205,7 +207,39 @@ namespace switchblade::ui
                 case C::Percussive: return "perc";
                 case C::Melodic:    return "mel";
                 case C::Texture:    return "tex";
+                case C::Grid:       return "grid";
                 default:            return "unk";
+            }
+        }
+
+        // wantsPitch is defined in Analysis/AnalysisEngine.h (public, single
+        // source of truth) — call sites below use ADL to resolve it via the
+        // SourceClass argument's namespace.
+
+        //----- Grid musical-subdivision stops ----------------------------------
+        // Powers of 2 plus the four common triplet positions, ordered ascending:
+        //
+        //   2  =  1/2        |   16 = 1/16
+        //   4  =  1/4        |   24 = 1/16T   (triplet sixteenths, 4 beats × 6)
+        //   6  =  1/4T       |   32 = 1/32
+        //   8  =  1/8        |   48 = 1/32T   (triplet 32nds,      4 beats × 12)
+        //  12  =  1/8T       |   64 = 1/64
+        //
+        // The slider snaps to these 10 values only; anything between (e.g. 13
+        // or 21) isn't a meaningful musical subdivision.
+        inline constexpr std::array<int, 10> kGridStops {
+            2, 4, 6, 8, 12, 16, 24, 32, 48, 64
+        };
+
+        [[nodiscard]] inline juce::String gridStopLabel (int n)
+        {
+            switch (n)
+            {
+                case  6: return "1/4T";
+                case 12: return "1/8T";
+                case 24: return "1/16T";
+                case 48: return "1/32T";
+                default: return "1/" + juce::String (n);
             }
         }
 
@@ -281,7 +315,7 @@ namespace switchblade::ui
             const auto tag  = classificationTag (tile.classification());
 
             juce::String keySuffix;
-            if (tile.classification() == switchblade::analysis::SourceClass::Melodic)
+            if (wantsPitch (tile.classification()))
             {
                 out.pitchHz = detectSlicePitchHz (tf, start, end);
                 if (out.pitchHz.has_value())
@@ -322,6 +356,7 @@ namespace switchblade::ui
         for (int i = 0; i < static_cast<int> (kModeNames.size()); ++i)
             modeCombo_.addItem (kModeNames[static_cast<std::size_t> (i)], i + 1);
         modeCombo_.setSelectedId (1, juce::dontSendNotification);
+        modeCombo_.onChange = [this] { applyModeSliderConfig(); };
         addAndMakeVisible (modeCombo_);
 
         // Sensitivity slider — wired to engine params on every change
@@ -332,8 +367,31 @@ namespace switchblade::ui
         sensitivitySlider_.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         sensitivitySlider_.onValueChange = [this]
         {
-            auto p = buildDetectorParams();
-            engine_.setDetectorParams (p);
+            if (sliderInGridMode_)
+            {
+                // Snap to the nearest musical subdivision (kGridStops in the
+                // anonymous namespace). 10 stops: powers of 2 + triplets.
+                const double v = sensitivitySlider_.getValue();
+                int best = kGridStops.front();
+                double bestDist = std::abs (v - static_cast<double> (best));
+                for (auto s : kGridStops)
+                {
+                    const double d = std::abs (v - static_cast<double> (s));
+                    if (d < bestDist) { best = s; bestDist = d; }
+                }
+                if (std::abs (v - static_cast<double> (best)) > 0.5)
+                    sensitivitySlider_.setValue (
+                        static_cast<double> (best), juce::dontSendNotification);
+
+                engine_.setGridDivisions (best);
+                sensitivityLabel_.setText (gridStopLabel (best),
+                                           juce::dontSendNotification);
+            }
+            else
+            {
+                auto p = buildDetectorParams();
+                engine_.setDetectorParams (p);
+            }
         };
         addAndMakeVisible (sensitivitySlider_);
 
@@ -565,7 +623,7 @@ namespace switchblade::ui
         // ── Centre pod (Controls) — horizontally centred in remaining bar ─────
         constexpr int kComboW   = 110;
         constexpr int kCenterG  = 15;
-        constexpr int kSensW    = 44;
+        constexpr int kSensW    = 68;   // wide enough for "1/32T" / "1/16T" in Grid mode
         constexpr int kSensGap  = 4;
         constexpr int kSliderW  = 150;
         constexpr int kCenterTotal = kComboW + kCenterG + kSensW + kSensGap + kSliderW;
@@ -739,9 +797,12 @@ namespace switchblade::ui
     bool MainContainer::isInterestedInFileDrag (const juce::StringArray& files)
     {
         for (auto& f : files)
-            if (formatManager_.findFormatForFileExtension (
-                    juce::File (f).getFileExtension()))
+        {
+            const juce::File jf (f);
+            if (jf.isDirectory()) return true;          // batch: accept folders
+            if (formatManager_.findFormatForFileExtension (jf.getFileExtension()))
                 return true;
+        }
         return false;
     }
 
@@ -750,15 +811,57 @@ namespace switchblade::ui
         dropHighlight_ = false;
         repaint();
 
+        // Expand folders to their audio-file children (recursive). Capped so
+        // a casual drop of a deep tree — or a directory containing a Windows
+        // reparse point / junction loop — can't freeze the UI for minutes or
+        // blow out memory. Files beyond the cap are silently dropped and the
+        // user sees a status message; they can re-drop a narrower selection.
+        constexpr int kMaxBatchFiles = 500;
+        juce::StringArray expanded;
+        bool              capped = false;
+        for (auto& f : files)
+        {
+            if (expanded.size() >= kMaxBatchFiles) { capped = true; break; }
+            const juce::File jf (f);
+            if (jf.isDirectory())
+            {
+                const auto wildcard = formatManager_.getWildcardForAllFormats();
+                for (const auto& child : jf.findChildFiles (
+                         juce::File::findFiles, true, wildcard))
+                {
+                    if (expanded.size() >= kMaxBatchFiles) { capped = true; break; }
+                    expanded.add (child.getFullPathName());
+                }
+            }
+            else
+            {
+                expanded.add (f);
+            }
+        }
+        if (capped)
+            setStatus ("Capped at " + juce::String (kMaxBatchFiles)
+                       + " files (folder contained more).");
+
         const auto mode = currentMode();
         int queued = 0;
 
-        for (auto& f : files)
+        for (auto& f : expanded)
         {
             const juce::File jf (f);
             if (! jf.existsAsFile()) continue;
 
-            const auto path = std::filesystem::path (jf.getFullPathName().toStdString());
+            // On Windows, std::filesystem::path(const std::string&) interprets
+            // the bytes as the active ANSI codepage and corrupts UTF-8 paths
+            // (juce::String::toStdString() returns UTF-8). Build from the
+            // wide-char form so non-ASCII filenames survive end-to-end into
+            // bext metadata and audio I/O.
+           #if JUCE_WINDOWS
+            const auto path = std::filesystem::path (
+                jf.getFullPathName().toWideCharPointer());
+           #else
+            const auto path = std::filesystem::path (
+                jf.getFullPathName().toStdString());
+           #endif
 
             // Create an immediate pending card so the user sees activity at once
             auto card = std::make_unique<SampleCard> (formatManager_, thumbnailCache_);
@@ -1066,7 +1169,7 @@ namespace switchblade::ui
                 if (! card->file() || card->transients().empty()) continue;
 
                 juce::String noteName;
-                if (card->classification() == switchblade::analysis::SourceClass::Melodic
+                if (wantsPitch (card->classification())
                     && card->pitchHz().has_value()
                     && card->pitchClarity().value_or (0.0f) > 0.5f)
                 {
@@ -1340,7 +1443,7 @@ namespace switchblade::ui
         // recordings (cello phrases, vocal lines, etc.) where the file-wide
         // pitch is meaningless. Falls back to the file-wide pitch only if
         // the slice itself is too short / silent for reliable detection.
-        const bool isMelodic = card.classification() == switchblade::analysis::SourceClass::Melodic;
+        const bool isMelodic = wantsPitch (card.classification());
         const std::optional<float> filePitchHz = isMelodic ? card.pitchHz() : std::optional<float>{};
 
         for (std::size_t i = 0; i < ts.size(); ++i)
@@ -1422,7 +1525,7 @@ namespace switchblade::ui
                 : juce::File (juce::String (tf.path.parent_path().string()));
             const auto tag    = classificationTag (card->classification());
 
-            const bool isMelodic = card->classification() == switchblade::analysis::SourceClass::Melodic;
+            const bool isMelodic = wantsPitch (card->classification());
             const std::optional<float> filePitchHz = isMelodic ? card->pitchHz() : std::optional<float>{};
 
             for (std::size_t i = 0; i < ts.size(); ++i)
@@ -1488,7 +1591,7 @@ namespace switchblade::ui
                     // multi-note recordings.
                     juce::String ks;
                     std::optional<float> pitchHz;
-                    if (tile.classification() == switchblade::analysis::SourceClass::Melodic)
+                    if (wantsPitch (tile.classification()))
                     {
                         pitchHz = detectSlicePitchHz (tf, start, end);
                         if (pitchHz.has_value())
@@ -1521,20 +1624,22 @@ namespace switchblade::ui
         if (numS <= 0 || numCh <= 0) return;
 
         const double sr = file.sampleRate;
-        // 5ms fade-in for clean attack; 30ms fade-out for professional one-shot tail
-        const int fadeInSamples  = static_cast<int> (std::round (0.005 * sr));
-        const int fadeSamples    = static_cast<int> (std::round (0.030 * sr));
+        // Shared fade profile — see Analysis/SliceFades.h. Capped to numS / 4
+        // so very short slices don't get over-faded into silence.
+        const auto fades = switchblade::analysis::sliceFades (numS, sr);
 
         juce::AudioBuffer<float> slice (numCh, numS);
         for (int ch = 0; ch < numCh; ++ch)
             slice.copyFrom (ch, 0, file.samples, ch, static_cast<int> (start), numS);
 
-        for (int ch = 0; ch < numCh; ++ch)
-            slice.applyGainRamp (ch, 0, std::min (fadeInSamples, numS), 0.0f, 1.0f);
+        if (fades.fadeInSamples > 0)
+            for (int ch = 0; ch < numCh; ++ch)
+                slice.applyGainRamp (ch, 0, fades.fadeInSamples, 0.0f, 1.0f);
 
-        const int fadeOutStart = std::max (0, numS - fadeSamples);
-        for (int ch = 0; ch < numCh; ++ch)
-            slice.applyGainRamp (ch, fadeOutStart, numS - fadeOutStart, 1.0f, 0.0f);
+        if (fades.fadeOutSamples > 0)
+            for (int ch = 0; ch < numCh; ++ch)
+                slice.applyGainRamp (ch, numS - fades.fadeOutSamples,
+                                     fades.fadeOutSamples, 1.0f, 0.0f);
 
         // Peak normalization — applied after fades so the fade-out doesn't
         // inflate the gain.  Peak is measured post-fade; target is linear.
@@ -1565,6 +1670,15 @@ namespace switchblade::ui
                 0, 127);
             meta.set (juce::WavAudioFormat::acidRootSet,  "1");
             meta.set (juce::WavAudioFormat::acidRootNote, juce::String (midiNote));
+        }
+
+        // Broadcast-WAV (EBU R 98) bext chunk — JUCE writes it when these
+        // bwav* keys are present. See Analysis/BwavMeta.h for field layout.
+        {
+            const auto bwav = switchblade::analysis::buildBwavMeta (
+                file.path, outFile.getFileNameWithoutExtension(), start);
+            for (const auto& key : bwav.getAllKeys())
+                meta.set (key, bwav[key]);
         }
 
         juce::WavAudioFormat wav;
@@ -1603,7 +1717,7 @@ namespace switchblade::ui
             if (! card->file() || card->transients().empty()) continue;
 
             juce::String noteName;
-            if (card->classification() == switchblade::analysis::SourceClass::Melodic
+            if (wantsPitch (card->classification())
                 && card->pitchHz().has_value()
                 && card->pitchClarity().value_or (0.0f) > 0.5f)
             {
@@ -1636,6 +1750,42 @@ namespace switchblade::ui
         statusLabel_.setText (msg);
     }
 
+    //==========================================================================
+    //  Sensitivity / Division slider context switch
+    //==========================================================================
+    void MainContainer::applyModeSliderConfig()
+    {
+        const bool wantGrid =
+            (currentMode() == switchblade::analysis::AnalysisMode::Grid);
+
+        if (wantGrid == sliderInGridMode_)
+            return;   // nothing changed
+
+        sliderInGridMode_ = wantGrid;
+
+        if (wantGrid)
+        {
+            // 10 musical subdivision stops (kGridStops): powers of 2 + triplets.
+            // Log-skew the slider so each doubling occupies equal visual width
+            // — the midpoint sits between 1/8 (8) and 1/8T (12), which is the
+            // geometric mean sqrt(2 * 64) ≈ 11.31.
+            sensitivitySlider_.setRange (2.0, 64.0, 1.0);
+            sensitivitySlider_.setSkewFactorFromMidPoint (std::sqrt (2.0 * 64.0));
+            sensitivitySlider_.setValue (16.0, juce::dontSendNotification);
+            sensitivityLabel_.setText (gridStopLabel (16),
+                                       juce::dontSendNotification);
+            engine_.setGridDivisions (16);
+        }
+        else
+        {
+            sensitivitySlider_.setRange (0.3, 1.3, 0.01);
+            sensitivitySlider_.setSkewFactor (1.0);   // restore linear
+            sensitivitySlider_.setValue (1.0, juce::dontSendNotification);
+            sensitivityLabel_.setText ("SENS", juce::dontSendNotification);
+            engine_.setDetectorParams (buildDetectorParams());
+        }
+    }
+
     switchblade::analysis::AnalysisMode MainContainer::currentMode() const noexcept
     {
         using M = switchblade::analysis::AnalysisMode;
@@ -1644,12 +1794,19 @@ namespace switchblade::ui
             case 2:  return M::Percussive;
             case 3:  return M::Melodic;
             case 4:  return M::Texture;
+            case 5:  return M::Grid;
             default: return M::Auto;
         }
     }
 
     float MainContainer::currentSensitivity() const noexcept
     {
+        // Honour the documented [0.3, 1.3] range: when the slider has been
+        // repurposed for Grid divisions (2..64) the raw value is meaningless
+        // as a sensitivity. Return the neutral default so any caller — present
+        // or future — gets a value inside the detector's design envelope.
+        if (sliderInGridMode_)
+            return 1.0f;
         return static_cast<float> (sensitivitySlider_.getValue());
     }
 

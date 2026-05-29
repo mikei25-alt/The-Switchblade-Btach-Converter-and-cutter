@@ -39,7 +39,10 @@ namespace switchblade::ui
         const juce::int64 totalSamples =
             static_cast<juce::int64> (file->samples.getNumSamples());
 
-        const bool isMelodic = classification == switchblade::analysis::SourceClass::Melodic;
+        // Per-slice pitch detection runs for any class that "wantsPitch":
+        // Melodic and Grid both produce tonal slices the user wants labelled
+        // with the actual per-slice note, not the file-wide first-frame pitch.
+        const bool pitched = switchblade::analysis::wantsPitch (classification);
 
         for (std::size_t i = 0; i < transients.size(); ++i)
         {
@@ -51,11 +54,8 @@ namespace switchblade::ui
                     : totalSamples);
             const juce::int64 endC = std::min (end, totalSamples);
 
-            // Per-slice pitch detection — each tile shows the note its own
-            // audio actually contains, not a single file-wide pitch. Falls
-            // back to the supplied file-wide noteName only if per-slice fails.
             juce::String thisNote = noteName;
-            if (isMelodic)
+            if (pitched)
             {
                 if (auto hz = switchblade::analysis::detectSlicePitchHz (*file, start, endC))
                     thisNote = juce::String (

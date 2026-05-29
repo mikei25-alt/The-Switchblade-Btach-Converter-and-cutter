@@ -3,6 +3,7 @@
 #include "Analysis/PitchDetector.h"
 #include "Analysis/SliceBoundary.h"
 #include "Analysis/NoteSegmenter.h"
+#include "Analysis/ZeroCrossing.h"
 
 #include <algorithm>
 #include <array>
@@ -63,6 +64,7 @@ namespace switchblade::analysis
                 case AnalysisMode::Percussive: return "percussive";
                 case AnalysisMode::Melodic:    return "melodic";
                 case AnalysisMode::Texture:    return "texture";
+                case AnalysisMode::Grid:       return "grid";
             }
             return "auto";
         }();
@@ -75,6 +77,7 @@ namespace switchblade::analysis
                 case SourceClass::Percussive: return "percussive";
                 case SourceClass::Melodic:    return "melodic";
                 case SourceClass::Texture:    return "texture";
+                case SourceClass::Grid:       return "grid";
                 default:                      return "unknown";
             }
         }();
@@ -311,6 +314,86 @@ namespace switchblade::analysis
                     break;
                 }
 
+                case AnalysisMode::Grid:
+                {
+                    // Equal-division slicing strategy. Classification stays
+                    // SourceClass::Grid so the badge still shows GRID, but we
+                    // ALSO run the file-wide pitch scan — Grid composes with
+                    // melodic detection so a 16-grid of a tonal loop exports
+                    // as Loop_C4_01.wav, Loop_E4_02.wav, …
+                    result.classification = SourceClass::Grid;
+
+                    const int N = std::clamp (
+                        owner_.gridDivisions_.load (std::memory_order_relaxed),
+                        2, 64);
+                    const juce::int64 totalLen = file->originalLengthInSamples;
+                    if (totalLen <= 0) { break; }
+
+                    // Mono mixdown — reused for both zero-crossing snap and
+                    // the optional file-wide pitch scan below.
+                    std::vector<float> mono;
+                    mixToMono (file->samples, mono);
+                    const juce::int64 snapRadius = static_cast<juce::int64> (
+                        std::round (0.005 * file->sampleRate));   // ±5 ms
+
+                    result.transients.reserve (static_cast<std::size_t> (N));
+                    juce::int64 prevSnapped = -1;
+                    for (int i = 0; i < N; ++i)
+                    {
+                        const juce::int64 raw = (totalLen * i) / N;
+                        juce::int64 snapped = mono.empty()
+                            ? raw
+                            : snapToZeroCrossing (
+                                std::span<const float> (mono.data(), mono.size()),
+                                raw, snapRadius);
+
+                        // Monotonicity guard — when N is large relative to file
+                        // length, 2*snapRadius can exceed the inter-slice step
+                        // and two adjacent boundaries can snap to overlapping
+                        // crossings. Fall back to the raw equal-division index
+                        // (strictly monotonic by construction) before allowing
+                        // any reorder/collapse.
+                        if (snapped <= prevSnapped)
+                            snapped = std::max (raw, prevSnapped + 1);
+                        prevSnapped = snapped;
+
+                        Transient t;
+                        t.sampleIndex    = snapped;
+                        t.rawSampleIndex = raw;
+                        t.timeSeconds    = static_cast<double> (snapped)
+                                         / file->sampleRate;
+                        t.confidence     = 1.0f;   // deterministic — every grid line is "certain"
+                        result.transients.push_back (t);
+                    }
+
+                    // ── Composable pitch detection ─────────────────────────
+                    // Mirrors the Melodic-mode scan: walk 2048-sample frames
+                    // at 50% hop, keep the first frame with clarity > 0.5.
+                    // Cheap (early-bails on a clear hit) and lets the export
+                    // pipeline produce cents-aware filenames for tonal grid
+                    // content while drum grids fall back to the "grid" tag.
+                    if (! mono.empty())
+                    {
+                        PitchDetector pd;
+                        constexpr std::size_t kFrame = 2048;
+                        for (std::size_t off = 0;
+                             off + kFrame <= mono.size();
+                             off += kFrame / 2)
+                        {
+                            auto pr = pd.detect (
+                                std::span<const float> (mono.data() + off, kFrame),
+                                file->sampleRate);
+                            if (pr.has_value() && pr->clarity > 0.5f)
+                            {
+                                result.pitchHz      = pr->f0Hz;
+                                result.pitchClarity = pr->clarity;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+
                 case AnalysisMode::Percussive:
                 default:
                 {
@@ -328,11 +411,17 @@ namespace switchblade::analysis
                 return jobHasFinished;
             }
 
+            // Grid mode produces deterministic equal-division boundaries that
+            // should chain back-to-back; the natural-end pass and the Top-4
+            // curation below would both subvert that intent (truncating tails
+            // and pruning slices respectively). Bypass both for Grid.
+            const bool isGrid = (result.classification == SourceClass::Grid);
+
             // ── Natural ends (needed before guardrail for accurate RMS windows) ──
             // Use the default -50 dB floor — the stratified guardrail's
             // next-onset gap clamp (20 ms) already prevents overlap between
             // adjacent slices without truncating the tail of single-shot samples.
-            if (! result.transients.empty())
+            if (! result.transients.empty() && ! isGrid)
                 computeNaturalEnds (*file, result.transients, -50.0f);
 
             // ── Stratified Top-4 curated one-shot guardrail ──────────────────
@@ -351,7 +440,7 @@ namespace switchblade::analysis
             //   4. For each kept slice: cap end at next-onset minus 20 ms gap,
             //      truncate to 1.5 s, discard if RMS < -45 dB.
             //   5. Re-sort kept slices by time for playback order.
-            if (! result.transients.empty())
+            if (! result.transients.empty() && ! isGrid)
             {
                 constexpr float      kMaxSliceSec  = 1.5f;
                 // Adaptive RMS gate: purely relative — discard a slice only if its
@@ -556,6 +645,11 @@ namespace switchblade::analysis
         detectorParams_ = p;
     }
 
+    void AnalysisEngine::setGridDivisions (int n)
+    {
+        gridDivisions_.store (std::clamp (n, 2, 64), std::memory_order_relaxed);
+    }
+
     void AnalysisEngine::setOnStarted (StartedCallback cb)
     {
         const juce::ScopedLock sl (callbackLock_);
@@ -657,6 +751,69 @@ namespace switchblade::analysis
                     {
                         result.pitchHz = pr->f0Hz;
                         break;
+                    }
+                }
+                break;
+            }
+            case AnalysisMode::Grid:
+            {
+                // CLI uses a fixed 16-division default; the UI's setGridDivisions
+                // doesn't apply here (analyzeSync has no engine instance). Future:
+                // expose --divisions=N on the CLI.
+                result.classification = SourceClass::Grid;
+                constexpr int N = 16;
+                const juce::int64 totalLen = file->originalLengthInSamples;
+                if (totalLen > 0)
+                {
+                    std::vector<float> mono;
+                    mixToMono (file->samples, mono);
+                    const juce::int64 snapRadius = static_cast<juce::int64> (
+                        std::round (0.005 * file->sampleRate));
+
+                    result.transients.reserve (static_cast<std::size_t> (N));
+                    juce::int64 prevSnapped = -1;
+                    for (int i = 0; i < N; ++i)
+                    {
+                        const juce::int64 raw = (totalLen * i) / N;
+                        juce::int64 snapped = mono.empty()
+                            ? raw
+                            : snapToZeroCrossing (
+                                std::span<const float> (mono.data(), mono.size()),
+                                raw, snapRadius);
+                        // Same monotonicity guard as the worker-thread path.
+                        if (snapped <= prevSnapped)
+                            snapped = std::max (raw, prevSnapped + 1);
+                        prevSnapped = snapped;
+
+                        Transient t;
+                        t.sampleIndex    = snapped;
+                        t.rawSampleIndex = raw;
+                        t.timeSeconds    = static_cast<double> (snapped) / file->sampleRate;
+                        t.confidence     = 1.0f;
+                        result.transients.push_back (t);
+                    }
+
+                    // Composable pitch scan — mirrors the async/worker Grid path
+                    // so CLI Grid output for tonal loops carries pitchHz and
+                    // downstream filename pipelines match the UI's behaviour.
+                    if (! mono.empty())
+                    {
+                        PitchDetector pd;
+                        constexpr std::size_t kFrame = 2048;
+                        for (std::size_t off = 0;
+                             off + kFrame <= mono.size();
+                             off += kFrame / 2)
+                        {
+                            auto pr = pd.detect (
+                                std::span<const float> (mono.data() + off, kFrame),
+                                file->sampleRate);
+                            if (pr.has_value() && pr->clarity > 0.5f)
+                            {
+                                result.pitchHz      = pr->f0Hz;
+                                result.pitchClarity = pr->clarity;
+                                break;
+                            }
+                        }
                     }
                 }
                 break;

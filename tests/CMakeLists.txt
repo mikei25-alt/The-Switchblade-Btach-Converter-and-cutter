@@ -16,7 +16,9 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(SwitchbladeTests
     analysis_perf_test.cpp
-    cents_suffix_test.cpp)
+    bwav_meta_test.cpp
+    cents_suffix_test.cpp
+    slice_fades_test.cpp)
 
 target_compile_features(SwitchbladeTests PRIVATE cxx_std_20)
 

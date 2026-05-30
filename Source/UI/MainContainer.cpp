@@ -329,6 +329,85 @@ namespace switchblade::ui
             out.filename = makeSliceFilename (stem, tag, keySuffix, tile.sliceIndex());
             return out;
         }
+
+        //----------------------------------------------------------------------
+        // renderSliceToWavImpl — anonymous-namespace free function so background
+        // pre-render jobs can call it without capturing `this`. The member
+        // MainContainer::renderSliceToWav is now a thin wrapper that forwards
+        // the current normTargetDb_ snapshot. Body is byte-identical to the
+        // member's previous implementation (peak normalize, micro-fades, ACID
+        // root note, BWAV bext chunk, 24-bit WAV write).
+        //----------------------------------------------------------------------
+        void renderSliceToWavImpl (const switchblade::analysis::AudioFile& file,
+                                   juce::int64 start, juce::int64 end,
+                                   const juce::File& outFile,
+                                   std::optional<float> pitchHz,
+                                   float normTargetDb)
+        {
+            const int numCh = file.samples.getNumChannels();
+            const int numS  = static_cast<int> (end - start);
+            if (numS <= 0 || numCh <= 0) return;
+
+            const double sr = file.sampleRate;
+            const auto   fades = switchblade::analysis::sliceFades (numS, sr);
+
+            juce::AudioBuffer<float> slice (numCh, numS);
+            for (int ch = 0; ch < numCh; ++ch)
+                slice.copyFrom (ch, 0, file.samples, ch, static_cast<int> (start), numS);
+
+            if (fades.fadeInSamples > 0)
+                for (int ch = 0; ch < numCh; ++ch)
+                    slice.applyGainRamp (ch, 0, fades.fadeInSamples, 0.0f, 1.0f);
+
+            if (fades.fadeOutSamples > 0)
+                for (int ch = 0; ch < numCh; ++ch)
+                    slice.applyGainRamp (ch, numS - fades.fadeOutSamples,
+                                         fades.fadeOutSamples, 1.0f, 0.0f);
+
+            if (normTargetDb < 0.0f)
+            {
+                float peak = 0.0f;
+                for (int ch = 0; ch < numCh; ++ch)
+                {
+                    const float* r = slice.getReadPointer (ch);
+                    for (int si = 0; si < numS; ++si)
+                        peak = std::max (peak, std::abs (r[si]));
+                }
+                if (peak > 1e-5f)
+                {
+                    const float target = std::pow (10.0f, normTargetDb / 20.0f);
+                    slice.applyGain (target / peak);
+                }
+            }
+
+            juce::StringPairArray meta;
+            if (pitchHz.has_value() && *pitchHz > 0.0f)
+            {
+                const int midiNote = std::clamp (
+                    static_cast<int> (std::round (
+                        69.0f + 12.0f * std::log2f (*pitchHz / 440.0f))),
+                    0, 127);
+                meta.set (juce::WavAudioFormat::acidRootSet,  "1");
+                meta.set (juce::WavAudioFormat::acidRootNote, juce::String (midiNote));
+            }
+            {
+                const auto bwav = switchblade::analysis::buildBwavMeta (
+                    file.path, outFile.getFileNameWithoutExtension(), start);
+                for (const auto& key : bwav.getAllKeys())
+                    meta.set (key, bwav[key]);
+            }
+
+            juce::WavAudioFormat wav;
+            auto* os = outFile.createOutputStream().release();
+            if (! os || os->failedToOpen()) { delete os; return; }
+
+            const auto writer = std::unique_ptr<juce::AudioFormatWriter> (
+                wav.createWriterFor (os, sr,
+                                     static_cast<unsigned int> (numCh),
+                                     24, meta, 0));
+            if (writer)
+                writer->writeFromAudioSampleBuffer (slice, 0, numS);
+        }
     } // namespace
 
     //==========================================================================
@@ -494,55 +573,68 @@ namespace switchblade::ui
         {
             updateSelectionCount();
         };
+        resultsVault_->onTileLanded = [this] (ResultTile& t)
+        {
+            queueTilePreRender (t);
+        };
+
         resultsVault_->onTileExternalDrag = [this] (ResultTile& tile)
         {
-            // Build the list of tiles to drag — all multi-selected ones if the
-            // initiating tile is part of a multi-selection, otherwise just itself.
+            // Bundled drag if the initiating tile is part of a Neon-Gold
+            // multi-selection, otherwise just the initiating tile. Each tile
+            // resolves to its pre-rendered temp WAV when one is available
+            // (queueTilePreRender ran on the bg pool the moment the tile
+            // landed); falls back to a synchronous render only when the bg
+            // job hasn't completed yet (very fast clicks, or the pool is
+            // backed up).
             const bool useSelection = tile.isMultiSelected()
                                    && resultsVault_->selectedTileCount() > 1;
 
             juce::StringArray paths;
-            auto tempFiles = std::make_shared<std::vector<juce::File>>();
 
-            auto renderOne = [&] (const ResultTile& t)
+            auto resolveOne = [&] (const ResultTile& t)
             {
+                const auto pre = t.preRenderedFile();
+                if (pre.existsAsFile())
+                {
+                    paths.add (pre.getFullPathName());
+                    return;
+                }
+
+                // Fallback path — bg render hasn't landed yet. Same logic the
+                // old sync-only code used; happens rarely now.
                 if (! t.file()) return;
                 const auto& tf = *t.file();
                 const juce::int64 len = tf.samples.getNumSamples();
                 const juce::int64 end = std::min (t.endSample(), len);
                 if (end <= t.startSample()) return;
 
-                // Mirror the export pipeline's naming so the clip name the DAW
-                // imports carries the analysed pitch (e.g. Bass_E1+12c_03.wav).
                 const auto named = buildTileFilename (t);
                 const juce::String fname = named.filename.isNotEmpty()
                     ? named.filename
                     : ("sb_drag_" + juce::String (t.sliceIndex()) + ".wav");
 
-                // Disambiguate collisions when two cards share the same stem +
-                // slice index (rare but possible after re-analysis).
                 auto tmp = tempDragDir().getChildFile (fname);
                 if (tmp.existsAsFile())
                     tmp = tmp.getNonexistentSibling (false);
-
                 renderSliceToWav (tf, t.startSample(), end, tmp, named.pitchHz);
                 if (tmp.existsAsFile())
-                {
                     paths.add (tmp.getFullPathName());
-                    tempFiles->push_back (tmp);
-                }
             };
 
             if (useSelection)
-                resultsVault_->forEachSelectedTile ([&] (const ResultTile& t) { renderOne (t); });
+                resultsVault_->forEachSelectedTile (
+                    [&] (const ResultTile& t) { resolveOne (t); });
             else
-                renderOne (tile);
+                resolveOne (tile);
 
             if (paths.isEmpty()) return;
 
+            // No post-drop delete: pre-rendered files persist for re-drag
+            // within the same session. Startup janitor sweeps stale files on
+            // next launch, so disk usage stays bounded across sessions.
             juce::DragAndDropContainer::performExternalDragDropOfFiles (
-                paths, false, &tile,
-                [tempFiles] { for (auto& f : *tempFiles) f.deleteFile(); });
+                paths, false, &tile);
         };
 
         // Engine callbacks
@@ -1240,6 +1332,72 @@ namespace switchblade::ui
     }
 
     //==========================================================================
+    //  Background drag pre-render
+    //==========================================================================
+    void MainContainer::queueTilePreRender (ResultTile& tile)
+    {
+        // Snapshot every value the bg job needs so nothing reaches across
+        // threads back to the UI. file is a shared_ptr<const AudioFile> — safe
+        // to read concurrently. The SafePointer is the only handle that
+        // touches the tile after dispatch, and it's checked on the message
+        // thread before being deref'd.
+        const auto file = tile.file();
+        if (! file) return;
+        const juce::int64 start = tile.startSample();
+        const juce::int64 end   = std::min (tile.endSample(),
+                                            static_cast<juce::int64> (
+                                                file->samples.getNumSamples()));
+        if (end <= start) return;
+
+        const auto                                classification = tile.classification();
+        const int                                 sliceIndex     = tile.sliceIndex();
+        const juce::String                        fileWideNote   = tile.noteName();
+        juce::Component::SafePointer<ResultTile>  weak           = &tile;
+        const juce::File                          tempDir        = tempDragDir();
+        const float                               normDb         = normTargetDb_;
+
+        dragRenderPool_.addJob ([file, start, end, classification, sliceIndex,
+                                 fileWideNote, weak, tempDir, normDb] () mutable
+        {
+            // Mirror buildTileFilename's logic for the on-disk filename so the
+            // DAW sees the same meaningful name (e.g. Bass_E1+12c_03.wav) the
+            // sync render path produced before this background pass.
+            const auto& tf = *file;
+            const auto  stem = juce::File (juce::String (tf.path.string()))
+                                   .getFileNameWithoutExtension();
+            const auto  tag  = classificationTag (classification);
+
+            juce::String         keySuffix;
+            std::optional<float> pitchHz;
+            if (switchblade::analysis::wantsPitch (classification))
+            {
+                pitchHz = switchblade::analysis::detectSlicePitchHz (tf, start, end);
+                if (pitchHz.has_value())
+                    keySuffix = juce::String (
+                        switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (*pitchHz));
+                else
+                    keySuffix = fileWideNote;
+            }
+
+            const auto fname = makeSliceFilename (stem, tag, keySuffix, sliceIndex);
+            if (fname.isEmpty()) return;
+
+            auto outFile = tempDir.getChildFile (fname);
+            if (outFile.existsAsFile())
+                outFile = outFile.getNonexistentSibling (false);
+
+            renderSliceToWavImpl (tf, start, end, outFile, pitchHz, normDb);
+            if (! outFile.existsAsFile()) return;
+
+            juce::MessageManager::callAsync ([weak, outFile] () mutable
+            {
+                if (auto* t = weak.getComponent())
+                    t->setPreRenderedFile (std::move (outFile));
+            });
+        });
+    }
+
+    //==========================================================================
     //  Card deletion
     //==========================================================================
     juce::PropertiesFile& MainContainer::userSettings()
@@ -1619,78 +1777,7 @@ namespace switchblade::ui
         const juce::File& outFile,
         std::optional<float> pitchHz) const
     {
-        const int numCh = file.samples.getNumChannels();
-        const int numS  = static_cast<int> (end - start);
-        if (numS <= 0 || numCh <= 0) return;
-
-        const double sr = file.sampleRate;
-        // Shared fade profile — see Analysis/SliceFades.h. Capped to numS / 4
-        // so very short slices don't get over-faded into silence.
-        const auto fades = switchblade::analysis::sliceFades (numS, sr);
-
-        juce::AudioBuffer<float> slice (numCh, numS);
-        for (int ch = 0; ch < numCh; ++ch)
-            slice.copyFrom (ch, 0, file.samples, ch, static_cast<int> (start), numS);
-
-        if (fades.fadeInSamples > 0)
-            for (int ch = 0; ch < numCh; ++ch)
-                slice.applyGainRamp (ch, 0, fades.fadeInSamples, 0.0f, 1.0f);
-
-        if (fades.fadeOutSamples > 0)
-            for (int ch = 0; ch < numCh; ++ch)
-                slice.applyGainRamp (ch, numS - fades.fadeOutSamples,
-                                     fades.fadeOutSamples, 1.0f, 0.0f);
-
-        // Peak normalization — applied after fades so the fade-out doesn't
-        // inflate the gain.  Peak is measured post-fade; target is linear.
-        if (normTargetDb_ < 0.0f)
-        {
-            float peak = 0.0f;
-            for (int ch = 0; ch < numCh; ++ch)
-            {
-                const float* r = slice.getReadPointer (ch);
-                for (int si = 0; si < numS; ++si)
-                    peak = std::max (peak, std::abs (r[si]));
-            }
-            if (peak > 1e-5f)   // skip near-silent slices
-            {
-                const float target = std::pow (10.0f, normTargetDb_ / 20.0f);
-                slice.applyGain (target / peak);
-            }
-        }
-
-        // Build WAV metadata — embed MIDI root note in the ACID chunk so DAWs
-        // (Ableton, Logic, FL Studio, etc.) read the pitch on import.
-        juce::StringPairArray meta;
-        if (pitchHz.has_value() && *pitchHz > 0.0f)
-        {
-            const int midiNote = std::clamp (
-                static_cast<int> (std::round (
-                    69.0f + 12.0f * std::log2f (*pitchHz / 440.0f))),
-                0, 127);
-            meta.set (juce::WavAudioFormat::acidRootSet,  "1");
-            meta.set (juce::WavAudioFormat::acidRootNote, juce::String (midiNote));
-        }
-
-        // Broadcast-WAV (EBU R 98) bext chunk — JUCE writes it when these
-        // bwav* keys are present. See Analysis/BwavMeta.h for field layout.
-        {
-            const auto bwav = switchblade::analysis::buildBwavMeta (
-                file.path, outFile.getFileNameWithoutExtension(), start);
-            for (const auto& key : bwav.getAllKeys())
-                meta.set (key, bwav[key]);
-        }
-
-        juce::WavAudioFormat wav;
-        auto* os = outFile.createOutputStream().release();
-        if (! os || os->failedToOpen()) { delete os; return; }
-
-        const auto writer = std::unique_ptr<juce::AudioFormatWriter> (
-            wav.createWriterFor (os, sr,
-                                 static_cast<unsigned int> (numCh),
-                                 24, meta, 0));
-        if (writer)
-            writer->writeFromAudioSampleBuffer (slice, 0, numS);
+        renderSliceToWavImpl (file, start, end, outFile, pitchHz, normTargetDb_);
     }
 
     //==========================================================================

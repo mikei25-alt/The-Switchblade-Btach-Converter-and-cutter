@@ -57,6 +57,14 @@ namespace switchblade::ui
         void setNormalized (bool n) noexcept { if (normalized_ == n) return; normalized_ = n; repaint(); }
         [[nodiscard]] bool isNormalized() const noexcept { return normalized_; }
 
+        /** Path to a temporary WAV pre-rendered by a background pool the moment
+            the tile lands in the vault. When the user starts a drag-out the
+            file is already on disk, so the gesture handoff is instant — no
+            sync render on the message thread. Empty until the bg job posts the
+            path back via Component::SafePointer + callAsync. */
+        void setPreRenderedFile (juce::File f) noexcept { preRenderedFile_ = std::move (f); }
+        [[nodiscard]] juce::File preRenderedFile() const noexcept { return preRenderedFile_; }
+
         std::function<void (AudioFilePtr, juce::int64, juce::int64)> onPlay;
         std::function<void (AudioFilePtr, juce::int64, juce::int64)> onSelected;
         /** Fired after Ctrl+click toggles multiSelected_ — used by the vault
@@ -94,6 +102,7 @@ namespace switchblade::ui
         bool  normalized_    { false };   // show gold "N" badge when norm export is active
         float entryGlow_     { 0.0f };   // 1 = white-hot, decays to 0 over ~1.2s
         bool  dragStarted_   { false };  // guard: fire onExternalDrag only once per press
+        juce::File preRenderedFile_;     // populated by MainContainer's drag-render pool
 
         juce::VBlankAttachment vblank_;
 

@@ -234,7 +234,14 @@ namespace switchblade::ui
         tile->setNormalized (normMode_);
         addAndMakeVisible (*tile);
         tile->triggerEntryGlow();
+
+        // Hand the raw pointer to MainContainer BEFORE we move the unique_ptr
+        // into tiles_ — the bg pre-render queue captures a SafePointer, so the
+        // tile must already be a heap-managed Component at the time of capture.
+        ResultTile* raw = tile.get();
         tiles_.push_back (std::move (tile));
+
+        if (onTileLanded) onTileLanded (*raw);
 
         relayout();
         repaint();

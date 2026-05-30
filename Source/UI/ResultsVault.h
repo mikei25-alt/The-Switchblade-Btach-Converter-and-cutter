@@ -96,6 +96,12 @@ namespace switchblade::ui
             file(s) and calling performExternalDragDropOfFiles. */
         std::function<void (ResultTile&)> onTileExternalDrag;
 
+        /** Fired the moment a pending slice materialises into a live tile
+            (the drain-timer stagger drops one per tick). MainContainer uses
+            this to queue background pre-rendering of the slice's temp WAV so
+            a subsequent drag-out is instant. */
+        std::function<void (ResultTile&)> onTileLanded;
+
         //----- Component -------------------------------------------------------
         void paint     (juce::Graphics&) override;
         void resized   () override;

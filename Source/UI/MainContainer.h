@@ -244,6 +244,14 @@ namespace switchblade::ui
         //----- Drag a card's source file out to the OS / DAW ------------------
         void dragOutCard (SampleCard* card);
 
+        //----- Background drag pre-render -------------------------------------
+        // Each landed vault tile is rendered to tempDragDir on a small bg pool
+        // so the subsequent drag-out gesture is instant. The path lands back on
+        // the tile via Component::SafePointer + callAsync. The pool is held
+        // here (not on AnalysisEngine) to keep analysis throughput independent.
+        juce::ThreadPool dragRenderPool_ { 2 };
+        void queueTilePreRender (ResultTile& tile);
+
         //----- Sensitivity / Division slider context switch -------------------
         // When Grid mode is selected the slider's range, value, and label
         // change to drive the engine's gridDivisions count instead of the

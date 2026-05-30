@@ -109,3 +109,74 @@ TEST(PitchResolution, DetectsSubSemitoneCentsOffset)
     EXPECT_NE (PD::noteNameWithCentsFromHz (*a),
                PD::noteNameWithCentsFromHz (*aPlus));
 }
+
+// =============================================================================
+//  SweepReport — exhaustive spectrum walk. Not a pass/fail check (gated by a
+//  loose tolerance so it never fails), but a stdout table that shows the
+//  engine's accuracy at every musically-interesting frequency. Run with:
+//      SwitchbladeTests.exe --gtest_filter=PitchResolution.SweepReport
+// =============================================================================
+TEST(PitchResolution, SweepReport)
+{
+    struct Tone { float hz; const char* expectedNote; const char* tag; };
+    const std::vector<Tone> sweep {
+        // sub-bass region — would all collapse to bin 1 in a 1024-pt FFT
+        { 30.87f, "B0",   "low B0"        },
+        { 38.89f, "D#1",  "D#1"           },
+        { 41.20f, "E1",   "E1 (low bass)" },
+        { 43.65f, "F1",   "F1 (E1+1)"     },
+        { 49.00f, "G1",   "G1"            },
+        { 55.00f, "A1",   "A1"            },
+        // bass
+        { 65.41f, "C2",   "C2"            },
+        { 82.41f, "E2",   "E2 (open low E)"},
+        { 110.0f, "A2",   "A2"            },
+        { 116.54f,"A#2",  "A#2 (A2+1)"    },
+        { 130.81f,"C3",   "C3"            },
+        // mid
+        { 220.0f, "A3",   "A3"            },
+        { 261.63f,"C4",   "C4 (middle C)" },
+        { 329.63f,"E4",   "E4"            },
+        { 440.0f, "A4",   "A4 (tuning)"   },
+        { 466.16f,"A#4",  "A#4 (A4+1)"    },
+        // high
+        { 523.25f,"C5",   "C5"            },
+        { 659.26f,"E5",   "E5"            },
+        { 880.0f, "A5",   "A5"            },
+        { 1046.5f,"C6",   "C6"            },
+        // detuned — the real-world case
+        { 441.0f,  "A4",  "A4 +04c"       },
+        { 443.06f, "A4",  "A4 +12c"       },
+        { 437.0f,  "A4",  "A4 -12c"       },
+        { 446.16f, "A4",  "A4 +24c (qrtr)"},
+    };
+
+    std::printf ("\n");
+    std::printf ("   target Hz    detected Hz    error Hz   note    cents  label\n");
+    std::printf ("   ---------    -----------    --------   ----    -----  --------\n");
+
+    using PD = switchblade::analysis::PitchDetector;
+    int pass = 0;
+    for (const auto& t : sweep)
+    {
+        const auto buf = sine (t.hz, 22050);
+        const auto hz  = switchblade::analysis::detectSlicePitchHz (buf, 0, 22050);
+        if (! hz.has_value())
+        {
+            std::printf ("   %8.2f     %s\n", t.hz, "(no detection)");
+            continue;
+        }
+        const auto note  = PD::noteNameFromHz (*hz);
+        const auto cents = PD::centsOffsetFromHz (*hz);
+        const auto label = PD::noteNameWithCentsFromHz (*hz);
+        const float err  = *hz - t.hz;
+        const bool  ok   = note == t.expectedNote;
+        if (ok) ++pass;
+        std::printf ("   %8.2f      %8.3f    %+7.3f   %-4s   %+4d   %-10s  %s\n",
+                     t.hz, *hz, err, note.c_str(), cents,
+                     label.c_str(), ok ? "OK" : "MISS");
+    }
+    std::printf ("\n   %d / %zu notes matched expectation\n\n",
+                 pass, sweep.size());
+    EXPECT_EQ (pass, static_cast<int> (sweep.size()));
+}

@@ -194,6 +194,12 @@ namespace switchblade::ui
         juce::ComboBox     modeCombo_;
         juce::Slider       sensitivitySlider_;
         juce::Label        sensitivityLabel_;
+        // Grid-only tempo field. Click-to-edit; shows the auto-detected BPM and
+        // accepts a manual override. Hidden outside Grid mode.
+        juce::Label        bpmField_;
+        // Grid-only "Max samples" field. Click-to-edit; "ALL" keeps every grid
+        // cell, a number curates to that many strong/distinct one-shots.
+        juce::Label        maxSamplesField_;
         juce::TextButton   extractAllBtn_      { "Extract All" };
         RightClickButton   produceBtn_         { "Produce" };
         RightClickButton   exportSelectionBtn_ { "Export Selection" };
@@ -227,6 +233,11 @@ namespace switchblade::ui
         //----- Runtime state -------------------------------------------------
         bool dropHighlight_ { false };
         bool analyzing_     { false };  // true while any jobs are in-flight
+        // True for the duration of an external drag-out (performExternalDrag-
+        // DropOfFiles is blocking on Windows). Guards filesDropped from
+        // re-ingesting our own drag as a new source card when the OS drop ends
+        // back over this window.
+        bool performingDragOut_ { false };
 
         //----- Private methods -----------------------------------------------
         void onAnalysisCompleted (switchblade::analysis::AnalysisResult result);
@@ -258,6 +269,21 @@ namespace switchblade::ui
         // transient detector's sensitivity.
         void applyModeSliderConfig();
         bool sliderInGridMode_ { false };
+
+        //----- Grid tempo (auto-detect + manual override) ---------------------
+        // When the user types a BPM into bpmField_ we set bpmUserOverride_ so
+        // the auto-detected value stops clobbering their entry. Clearing the
+        // field (or typing AUTO/0) returns to auto-detect.
+        bool   bpmUserOverride_ { false };
+        /** Push a manually-entered BPM into the engine and re-slice grid cards. */
+        void   commitBpmField();
+        /** Push the Max-samples cap into the engine and re-slice grid cards. */
+        void   commitMaxSamplesField();
+        /** Show an auto-detected BPM in the field (no-op once user-overridden). */
+        void   showDetectedBpm (double bpm);
+        /** Re-enqueue every loaded card under the current mode so a grid tweak
+            (subdivision or BPM) re-slices already-analysed files live. */
+        void   reAnalyzeGridCards();
 
         //----- Card deletion --------------------------------------------------
         /** Right-click on a card: show a PopupMenu with "Delete card" or

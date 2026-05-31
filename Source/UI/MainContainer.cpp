@@ -483,6 +483,48 @@ namespace switchblade::ui
         sensitivityLabel_.setMinimumHorizontalScale (1.0f);
         addAndMakeVisible (sensitivityLabel_);
 
+        // Grid-only tempo field. Single-click to edit; "AUTO" = auto-detect.
+        // A typed number overrides detection so the grid lays exact quarter-note
+        // boundaries at that BPM.
+        bpmField_.setEditable (true);
+        bpmField_.setJustificationType (juce::Justification::centred);
+        bpmField_.setColour (juce::Label::textColourId,       juce::Colour (0xFFE8C76B));
+        bpmField_.setColour (juce::Label::backgroundColourId, juce::Colour (0x22FFFFFF));
+        bpmField_.setFont (juce::Font (juce::FontOptions { 10.0f })
+                               .boldened()
+                               .withExtraKerningFactor (0.10f));
+        bpmField_.setTooltip ("Grid tempo (BPM). Auto-detected from the audio; "
+                              "click to type a BPM to override, or clear it for AUTO.");
+        bpmField_.setText ("AUTO", juce::dontSendNotification);
+        bpmField_.onTextChange = [this] { commitBpmField(); };
+        bpmField_.setVisible (false);   // shown only in Grid mode
+        addAndMakeVisible (bpmField_);
+
+        // Grid-only "Max samples" cap. "ALL" keeps every grid cell; a number
+        // curates to that many strong/distinct one-shots.
+        maxSamplesField_.setEditable (true);
+        maxSamplesField_.setJustificationType (juce::Justification::centred);
+        maxSamplesField_.setColour (juce::Label::textColourId,       juce::Colour (0xFFE8C76B));
+        maxSamplesField_.setColour (juce::Label::backgroundColourId, juce::Colour (0x22FFFFFF));
+        maxSamplesField_.setFont (juce::Font (juce::FontOptions { 10.0f })
+                                      .boldened()
+                                      .withExtraKerningFactor (0.10f));
+        maxSamplesField_.setTooltip ("Max one-shots Grid keeps. ALL = one per "
+                                     "subdivision; a number keeps that many "
+                                     "strongest, most distinct hits.");
+        maxSamplesField_.setText ("ALL", juce::dontSendNotification);
+        maxSamplesField_.onTextChange = [this] { commitMaxSamplesField(); };
+        maxSamplesField_.setVisible (false);   // shown only in Grid mode
+        addAndMakeVisible (maxSamplesField_);
+
+        // Re-slice grid cards live when the subdivision changes (on drag end so
+        // we don't re-enqueue on every intermediate slider value).
+        sensitivitySlider_.onDragEnd = [this]
+        {
+            if (sliderInGridMode_)
+                reAnalyzeGridCards();
+        };
+
         // Buttons
         extractAllBtn_.onClick      = [this] { extractAll(); };
         produceBtn_.onClick         = [this] { produceAllSlices(); };
@@ -557,13 +599,15 @@ namespace switchblade::ui
         resultsViewport_.setScrollBarsShown (true, false);
         addAndMakeVisible (resultsViewport_);
 
+        // exclusive=true: each vault tile click stops any currently-playing
+        // voice so previews replace one another instead of layering/accumulating.
         resultsVault_->onTilePlay = [this] (auto f, auto s, auto e)
         {
-            previewGrid_->playSlice (std::move (f), s, e);
+            previewGrid_->playSlice (std::move (f), s, e, true);
         };
         resultsVault_->onTileSelected = [this] (auto f, auto s, auto e)
         {
-            previewGrid_->playSlice (std::move (f), s, e);
+            previewGrid_->playSlice (std::move (f), s, e, true);
         };
         resultsVault_->onExportCollection = [this]
         {
@@ -633,8 +677,10 @@ namespace switchblade::ui
             // No post-drop delete: pre-rendered files persist for re-drag
             // within the same session. Startup janitor sweeps stale files on
             // next launch, so disk usage stays bounded across sessions.
+            performingDragOut_ = true;
             juce::DragAndDropContainer::performExternalDragDropOfFiles (
                 paths, false, &tile);
+            performingDragOut_ = false;
         };
 
         // Engine callbacks
@@ -718,7 +764,15 @@ namespace switchblade::ui
         constexpr int kSensW    = 68;   // wide enough for "1/32T" / "1/16T" in Grid mode
         constexpr int kSensGap  = 4;
         constexpr int kSliderW  = 150;
-        constexpr int kCenterTotal = kComboW + kCenterG + kSensW + kSensGap + kSliderW;
+        constexpr int kBpmW     = 70;   // "AUTO" / "118 BPM"
+        constexpr int kMaxW     = 56;   // "ALL" / "4"
+        // The BPM + Max fields only occupy the bar in Grid mode; reserve their
+        // width (plus gaps) only then so the centre pod stays centred in every
+        // mode.
+        const int kBpmSlot  = sliderInGridMode_
+            ? (kSensGap + kBpmW + kSensGap + kMaxW) : 0;
+        const int kCenterTotal =
+            kComboW + kCenterG + kSensW + kSensGap + kSliderW + kBpmSlot;
 
         const int leftPad = juce::jmax (15, (bar.getWidth() - kCenterTotal) / 2);
         bar.removeFromLeft (leftPad);
@@ -728,6 +782,13 @@ namespace switchblade::ui
         sensitivityLabel_.setBounds (bar.removeFromLeft (kSensW));
         bar.removeFromLeft (kSensGap);
         sensitivitySlider_.setBounds(b32 (bar.removeFromLeft (kSliderW)));
+        if (sliderInGridMode_)
+        {
+            bar.removeFromLeft (kSensGap);
+            bpmField_.setBounds (b32 (bar.removeFromLeft (kBpmW)));
+            bar.removeFromLeft (kSensGap);
+            maxSamplesField_.setBounds (b32 (bar.removeFromLeft (kMaxW)));
+        }
 
         // Status fills whatever remains between centre group and right pod —
         // empty by default, populated by setStatus() during analysis.
@@ -903,6 +964,13 @@ namespace switchblade::ui
         dropHighlight_ = false;
         repaint();
 
+        // Ignore our own drag-out round-tripping back onto the window: dragging
+        // a vault tile out to the OS can end over this same window, and JUCE
+        // then delivers it here as a drop — which would re-ingest the exported
+        // slice as a phantom source card.
+        if (performingDragOut_)
+            return;
+
         // Expand folders to their audio-file children (recursive). Capped so
         // a casual drop of a deep tree — or a directory containing a Windows
         // reparse point / junction loop — can't freeze the UI for minutes or
@@ -941,6 +1009,9 @@ namespace switchblade::ui
         {
             const juce::File jf (f);
             if (! jf.existsAsFile()) continue;
+            // Never re-ingest our own pre-rendered drag-out temp files (belt-
+            // and-suspenders alongside the performingDragOut_ guard above).
+            if (jf.getParentDirectory() == tempDragDir()) continue;
 
             // On Windows, std::filesystem::path(const std::string&) interprets
             // the bytes as the active ANSI codepage and corrupts UTF-8 paths
@@ -1079,6 +1150,11 @@ namespace switchblade::ui
         card->setPitchHz (result.pitchHz);
         card->setPitchClarity (result.pitchClarity);
         card->triggerEntryGlow();     // "cooling" neon arrival animation
+
+        // Grid mode reports the beat period it used — surface it in the BPM
+        // field so the user sees what was detected (and can override it).
+        if (result.detectedBpm.has_value())
+            showDetectedBpm (*result.detectedBpm);
 
         // Vault is rebuilt in cards_ order in onAllAnalysisComplete — not here —
         // so tile 001 always corresponds to pad 1, tile 016 to pad V.
@@ -1327,8 +1403,10 @@ namespace switchblade::ui
 
         // canMoveFiles = false: never let a DAW take ownership of the user's
         // original source. The OS does a copy-on-import for safety.
+        performingDragOut_ = true;
         juce::DragAndDropContainer::performExternalDragDropOfFiles (
             paths, false, card);
+        performingDragOut_ = false;
     }
 
     //==========================================================================
@@ -1862,6 +1940,16 @@ namespace switchblade::ui
             sensitivityLabel_.setText (gridStopLabel (16),
                                        juce::dontSendNotification);
             engine_.setGridDivisions (16);
+
+            // Enter Grid: reset to auto-detect / keep-all and reveal the fields.
+            bpmUserOverride_ = false;
+            engine_.setManualBpm (0.0);
+            bpmField_.setText ("AUTO", juce::dontSendNotification);
+            bpmField_.setVisible (true);
+
+            engine_.setGridMaxSamples (0);
+            maxSamplesField_.setText ("ALL", juce::dontSendNotification);
+            maxSamplesField_.setVisible (true);
         }
         else
         {
@@ -1870,7 +1958,71 @@ namespace switchblade::ui
             sensitivitySlider_.setValue (1.0, juce::dontSendNotification);
             sensitivityLabel_.setText ("SENS", juce::dontSendNotification);
             engine_.setDetectorParams (buildDetectorParams());
+            bpmField_.setVisible (false);
+            maxSamplesField_.setVisible (false);
         }
+
+        resized();   // re-lay the centre pod now that bpmField_ visibility changed
+    }
+
+    void MainContainer::showDetectedBpm (double bpm)
+    {
+        // The user's manual entry wins — never overwrite it with a detection.
+        if (bpmUserOverride_ || bpm <= 0.0)
+            return;
+        bpmField_.setText (juce::String (juce::roundToInt (bpm)) + " BPM",
+                           juce::dontSendNotification);
+    }
+
+    void MainContainer::commitBpmField()
+    {
+        // Parse the leading number; "AUTO", empty, or 0 returns to auto-detect.
+        const double v = bpmField_.getText().trim().getDoubleValue();
+        if (v > 0.0)
+        {
+            bpmUserOverride_ = true;
+            engine_.setManualBpm (v);
+            bpmField_.setText (juce::String (juce::roundToInt (v)) + " BPM",
+                               juce::dontSendNotification);
+        }
+        else
+        {
+            bpmUserOverride_ = false;
+            engine_.setManualBpm (0.0);
+            bpmField_.setText ("AUTO", juce::dontSendNotification);
+        }
+
+        if (sliderInGridMode_)
+            reAnalyzeGridCards();
+    }
+
+    void MainContainer::commitMaxSamplesField()
+    {
+        // Parse the leading integer; "ALL", empty, or 0 means keep every cell.
+        const int n = maxSamplesField_.getText().trim().getIntValue();
+        if (n > 0)
+        {
+            engine_.setGridMaxSamples (n);
+            maxSamplesField_.setText (juce::String (n), juce::dontSendNotification);
+        }
+        else
+        {
+            engine_.setGridMaxSamples (0);
+            maxSamplesField_.setText ("ALL", juce::dontSendNotification);
+        }
+
+        if (sliderInGridMode_)
+            reAnalyzeGridCards();
+    }
+
+    void MainContainer::reAnalyzeGridCards()
+    {
+        // Re-slice every loaded card under the current mode so a grid tweak
+        // (subdivision or BPM) takes effect on already-analysed files.
+        const auto mode = currentMode();
+        for (const auto& c : cards_)
+            if (c && c->file())
+                reAnalyzeCard (c.get(), mode);
     }
 
     switchblade::analysis::AnalysisMode MainContainer::currentMode() const noexcept

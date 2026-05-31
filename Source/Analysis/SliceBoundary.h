@@ -171,4 +171,52 @@ namespace switchblade::analysis
             transients[i].naturalEnd = std::min (end, total);
         }
     }
+
+    //==========================================================================
+    //  trimGridSlicesToOneShots
+    //
+    //  Turn equal-division Grid boundaries into per-cell ONE-SHOTS. Each slice
+    //  keeps its grid-line start but ends at the hit's natural decay, capped at
+    //  the next grid line (minus a small gap). The two cases this fixes:
+    //    • short note → trims the dead air between the note's tail and the next
+    //      grid line (no trailing silence in the one-shot);
+    //    • long / ringing note → caps at the next grid line so the next note in
+    //      the sequence never bleeds into this one-shot.
+    //
+    //  Unlike finalizeSliceBoundaries this imposes NO fixed max-length cap: the
+    //  next-grid-line bound (plus computeNaturalEnds' own 6 s safety) is the
+    //  natural ceiling, so coarse subdivisions / slow tempos keep the full hit.
+    //  Assumes transients are already sorted ascending (grid output is).
+    //==========================================================================
+    inline void trimGridSlicesToOneShots (
+        const AudioFile&        file,
+        std::vector<Transient>& transients,
+        float silenceDb = -50.0f,
+        float gapSec    = 0.020f)
+    {
+        if (transients.empty() || ! file.isValid())
+            return;
+
+        for (auto& t : transients) t.naturalEnd = 0;
+        computeNaturalEnds (file, transients, silenceDb);
+
+        const std::int64_t total = file.samples.getNumSamples();
+        const std::int64_t gap   = static_cast<std::int64_t> (
+            std::llround (static_cast<double> (gapSec) * file.sampleRate));
+
+        for (std::size_t i = 0; i < transients.size(); ++i)
+        {
+            std::int64_t end = (transients[i].naturalEnd > 0)
+                ? transients[i].naturalEnd : total;
+
+            if (i + 1 < transients.size())
+            {
+                const std::int64_t cap = transients[i + 1].sampleIndex - gap;
+                if (cap > transients[i].sampleIndex && end > cap)
+                    end = cap;
+            }
+
+            transients[i].naturalEnd = std::min (end, total);
+        }
+    }
 } // namespace switchblade::analysis

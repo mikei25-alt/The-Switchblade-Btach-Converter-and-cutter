@@ -81,6 +81,7 @@ namespace switchblade::analysis
         std::vector<Transient>  transients;
         std::optional<float>    pitchHz;            // set when Melodic mode runs YIN
         std::optional<float>    pitchClarity;       // 0..1 — confidence in pitch estimate
+        std::optional<double>   detectedBpm;        // set by Grid mode (auto-detected or manual)
         juce::String            errorMessage;       // empty on success
 
         [[nodiscard]] bool ok() const noexcept { return errorMessage.isEmpty(); }
@@ -114,6 +115,19 @@ namespace switchblade::analysis
         /** Set the number of equal-length divisions used by AnalysisMode::Grid.
             Clamped to [2, 64] (matches the project's Slice Count Ceiling). */
         void setGridDivisions (int n);
+
+        /** Manual tempo override for AnalysisMode::Grid, in BPM. 0 (default)
+            means auto-detect the beat period from the audio. A positive value
+            forces that tempo so the grid lays exact quarter-note-relative
+            boundaries regardless of detection. Applies to subsequently-enqueued
+            files. */
+        void setManualBpm (double bpm);
+
+        /** Cap the number of one-shots AnalysisMode::Grid emits. After slicing
+            on the subdivision, Grid curates down to the N strongest + most
+            distinct hits (variety-maximising selection). 0 (default) keeps every
+            non-silent grid cell. Applies to subsequently-enqueued files. */
+        void setGridMaxSamples (int n);
 
         /** Called on the message thread when a job begins (before DSP runs). */
         void setOnStarted  (StartedCallback cb);
@@ -149,6 +163,8 @@ namespace switchblade::analysis
         juce::ThreadPool                pool_;
         TransientDetector::Params       detectorParams_;
         std::atomic<int>                gridDivisions_   { 16 };  // for AnalysisMode::Grid
+        std::atomic<double>             manualBpm_       { 0.0 }; // Grid tempo override; 0 = auto-detect
+        std::atomic<int>                gridMaxSamples_  { 0 };   // Grid one-shot cap; 0 = keep all cells
         StartedCallback                 onStarted_;
         CompletionCallback              onComplete_;
         AllCompleteCallback             onAllComplete_;

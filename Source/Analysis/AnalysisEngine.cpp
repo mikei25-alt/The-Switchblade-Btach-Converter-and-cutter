@@ -4,6 +4,12 @@
 #include "Analysis/SliceBoundary.h"
 #include "Analysis/NoteSegmenter.h"
 #include "Analysis/ZeroCrossing.h"
+#include "Analysis/GridSlicer.h"
+#include "Analysis/GridCuration.h"
+
+#include <optional>
+#include <span>
+#include <string>
 
 #include <algorithm>
 #include <array>
@@ -91,6 +97,9 @@ namespace switchblade::analysis
             root->setProperty ("pitchNote",   juce::String (
                 PitchDetector::noteNameFromHz (*pitchHz)));
         }
+
+        if (detectedBpm.has_value())
+            root->setProperty ("detectedBpm", *detectedBpm);
 
         juce::Array<juce::var> slices;
         slices.ensureStorageAllocated (static_cast<int> (transients.size()));
@@ -329,42 +338,35 @@ namespace switchblade::analysis
                     const juce::int64 totalLen = file->originalLengthInSamples;
                     if (totalLen <= 0) { break; }
 
-                    // Mono mixdown — reused for both zero-crossing snap and
-                    // the optional file-wide pitch scan below.
+                    // Mono mixdown — reused for tempo detection, zero-crossing
+                    // snap, and the optional file-wide pitch scan below.
                     std::vector<float> mono;
                     mixToMono (file->samples, mono);
-                    const juce::int64 snapRadius = static_cast<juce::int64> (
-                        std::round (0.005 * file->sampleRate));   // ±5 ms
 
-                    result.transients.reserve (static_cast<std::size_t> (N));
-                    juce::int64 prevSnapped = -1;
-                    for (int i = 0; i < N; ++i)
-                    {
-                        const juce::int64 raw = (totalLen * i) / N;
-                        juce::int64 snapped = mono.empty()
-                            ? raw
-                            : snapToZeroCrossing (
-                                std::span<const float> (mono.data(), mono.size()),
-                                raw, snapRadius);
+                    // Tempo precedence: manual override → filename BPM (library
+                    // files like "TSE_120_…Tabla.wav" label it reliably) → blind
+                    // audio detection inside buildGridTransients.
+                    double forcedBpm = owner_.manualBpm_.load (std::memory_order_relaxed);
+                    if (forcedBpm <= 0.0)
+                        if (const auto fn = parseBpmFromFilename (result.path.filename().string()))
+                            forcedBpm = *fn;
 
-                        // Monotonicity guard — when N is large relative to file
-                        // length, 2*snapRadius can exceed the inter-slice step
-                        // and two adjacent boundaries can snap to overlapping
-                        // crossings. Fall back to the raw equal-division index
-                        // (strictly monotonic by construction) before allowing
-                        // any reorder/collapse.
-                        if (snapped <= prevSnapped)
-                            snapped = std::max (raw, prevSnapped + 1);
-                        prevSnapped = snapped;
+                    // Tempo-relative boundaries: lay 1/N-note grid lines across
+                    // the whole file at the detected (or forced) beat period.
+                    auto gb = buildGridTransients (
+                        std::span<const float> (mono.data(), mono.size()),
+                        file->sampleRate, totalLen, N, forcedBpm);
+                    result.transients = std::move (gb.transients);
+                    result.detectedBpm = gb.bpm;
 
-                        Transient t;
-                        t.sampleIndex    = snapped;
-                        t.rawSampleIndex = raw;
-                        t.timeSeconds    = static_cast<double> (snapped)
-                                         / file->sampleRate;
-                        t.confidence     = 1.0f;   // deterministic — every grid line is "certain"
-                        result.transients.push_back (t);
-                    }
+                    // One-shot per subdivision: trim each grid cell to its hit's
+                    // natural decay (no dead air, no bleed into the next cell).
+                    trimGridSlicesToOneShots (*file, result.transients);
+
+                    // Optional curation: keep only the N strongest + most
+                    // distinct one-shots when the user has set a Max-samples cap.
+                    if (const int mx = owner_.gridMaxSamples_.load (std::memory_order_relaxed); mx > 0)
+                        curateGridOneShots (*file, result.transients, mx);
 
                     // ── Composable pitch detection ─────────────────────────
                     // Mirrors the Melodic-mode scan: walk 2048-sample frames
@@ -650,6 +652,21 @@ namespace switchblade::analysis
         gridDivisions_.store (std::clamp (n, 2, 64), std::memory_order_relaxed);
     }
 
+    void AnalysisEngine::setManualBpm (double bpm)
+    {
+        // Negative/zero → auto-detect. Clamp positive values to a sane musical
+        // range so a fat-fingered entry can't produce sub-sample grid steps.
+        manualBpm_.store (bpm > 0.0 ? std::clamp (bpm, 20.0, 400.0) : 0.0,
+                          std::memory_order_relaxed);
+    }
+
+    void AnalysisEngine::setGridMaxSamples (int n)
+    {
+        // Negative → treat as 0 (no cap). No upper clamp: the grid itself is
+        // already runaway-guarded, and curation is a no-op when n >= cell count.
+        gridMaxSamples_.store (std::max (0, n), std::memory_order_relaxed);
+    }
+
     void AnalysisEngine::setOnStarted (StartedCallback cb)
     {
         const juce::ScopedLock sl (callbackLock_);
@@ -758,8 +775,9 @@ namespace switchblade::analysis
             case AnalysisMode::Grid:
             {
                 // CLI uses a fixed 16-division default; the UI's setGridDivisions
-                // doesn't apply here (analyzeSync has no engine instance). Future:
-                // expose --divisions=N on the CLI.
+                // doesn't apply here (analyzeSync has no engine instance). Tempo
+                // is auto-detected (no manual override on the CLI path). Future:
+                // expose --divisions=N / --bpm=N on the CLI.
                 result.classification = SourceClass::Grid;
                 constexpr int N = 16;
                 const juce::int64 totalLen = file->originalLengthInSamples;
@@ -767,31 +785,21 @@ namespace switchblade::analysis
                 {
                     std::vector<float> mono;
                     mixToMono (file->samples, mono);
-                    const juce::int64 snapRadius = static_cast<juce::int64> (
-                        std::round (0.005 * file->sampleRate));
 
-                    result.transients.reserve (static_cast<std::size_t> (N));
-                    juce::int64 prevSnapped = -1;
-                    for (int i = 0; i < N; ++i)
-                    {
-                        const juce::int64 raw = (totalLen * i) / N;
-                        juce::int64 snapped = mono.empty()
-                            ? raw
-                            : snapToZeroCrossing (
-                                std::span<const float> (mono.data(), mono.size()),
-                                raw, snapRadius);
-                        // Same monotonicity guard as the worker-thread path.
-                        if (snapped <= prevSnapped)
-                            snapped = std::max (raw, prevSnapped + 1);
-                        prevSnapped = snapped;
+                    // Filename BPM acts as the tempo hint on the CLI (no manual
+                    // field here); falls back to blind audio detection.
+                    double forcedBpm = 0.0;
+                    if (const auto fn = parseBpmFromFilename (result.path.filename().string()))
+                        forcedBpm = *fn;
 
-                        Transient t;
-                        t.sampleIndex    = snapped;
-                        t.rawSampleIndex = raw;
-                        t.timeSeconds    = static_cast<double> (snapped) / file->sampleRate;
-                        t.confidence     = 1.0f;
-                        result.transients.push_back (t);
-                    }
+                    auto gb = buildGridTransients (
+                        std::span<const float> (mono.data(), mono.size()),
+                        file->sampleRate, totalLen, N, forcedBpm);
+                    result.transients = std::move (gb.transients);
+                    result.detectedBpm = gb.bpm;
+
+                    // One-shot per subdivision (mirrors the async/worker path).
+                    trimGridSlicesToOneShots (*file, result.transients);
 
                     // Composable pitch scan — mirrors the async/worker Grid path
                     // so CLI Grid output for tonal loops carries pitchHz and

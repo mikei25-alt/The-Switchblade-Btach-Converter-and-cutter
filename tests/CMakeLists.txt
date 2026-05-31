@@ -19,7 +19,8 @@ add_executable(SwitchbladeTests
     bwav_meta_test.cpp
     cents_suffix_test.cpp
     pitch_resolution_test.cpp
-    slice_fades_test.cpp)
+    slice_fades_test.cpp
+    tempo_grid_test.cpp)
 
 target_compile_features(SwitchbladeTests PRIVATE cxx_std_20)
 

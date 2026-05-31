@@ -48,23 +48,22 @@ A high-tactile, Art-Deco inspired sample analysis and batch conversion tool. The
 - **skills:** Use these: /cpp-pro for any c++ processing, /batch-engineer: Build and configure batch processing tools.
   - shell-pro: Handle shell scripts and command-line tools
 
-## 
-**Next Steps:**  1. Check Density Guard (Fixing the "Thin Waveform" issue)
-
-  - Problem: You are seeing a very thin or nearly invisible waveform in the middle row (R_20210804-212747.wav) because the density setting (1.68) is too high for that specific file size. When a file is too short, the tool cannot generate   enough data slices, resulting in invisible audio.
-
-  - Solution: You need a Density Guard to limit the density slider so the tool is always given a safe amount of data (usually between 1.00 and 3.00) to process.                                                                                 - Set Density to: 1.3 (Keep 130% of the data).
-
+## AI Workflow & Skill Directives
+- **Direct Reads:** This project has no knowledge graph. Read files directly.
+- **Bug-Fix Loop:** Use `diagnose` for wrong behavior -> `cpp-build` for CMake/linker errors -> `cpp-test` for regressions -> `verify` -> commit.
+- **UI Exploration:** The Neon-Deco vision is greenfield. Use `design-an-interface` to generate 3 variants -> `prototype` to test them -> `feature-dev` for implementation.
+- **Final Checks:** Always run `code-review` followed by `simplify` before committing.
 
 
-  2. Slice Count Ceiling (Fixing the "4 loaded" stopping issue)
+## Context Navigation
+When you need to understand the codebase, docs, or any 
+files in this project:
 
-  - Problem: The current display shows "4 loaded." As the file is analyzed, the system will try to generate more slices than this "4" limit. Once the limit is hit, the tool stops working to save resources.
+1. ALWAYS query the knowledge graph first: 
+   '/graphify query "your question"'
 
-  - Solution: You need a Slice Count Ceiling to act as a hard stop.
+2. Only read raw files if I explicitly say "read the file" 
+   or "look at the raw file"
 
-    - Set Ceiling to: 10 (or higher, like 50, to ensure the file is fully processed).
-
-## 	1. ALWAYS query: '/graphify query "your question"'
-	2. Only read raw files if I explicitly say so
-	3. Use 'graphify-out/wiki/index.md' for navigation
+3. Use 'graphify-out/wiki/index.md' as your navigation 
+   entrypoint for browsing structure

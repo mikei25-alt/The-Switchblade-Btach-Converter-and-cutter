@@ -26,25 +26,29 @@ namespace switchblade::analysis
         if (lo >= hi)
             return target;
 
-        std::int64_t bestIdx = target;
-        std::int64_t bestDist = searchRadius + 1;
-
-        for (std::int64_t i = lo; i <= hi; ++i)
+        const auto crossesAt = [&] (std::int64_t i) noexcept
         {
             const float a = mono[static_cast<std::size_t> (i - 1)];
             const float b = mono[static_cast<std::size_t> (i)];
-            const bool  crosses = (a <= 0.0f && b > 0.0f) || (a >= 0.0f && b < 0.0f);
+            return (a <= 0.0f && b > 0.0f) || (a >= 0.0f && b < 0.0f);
+        };
 
-            if (crosses)
-            {
-                const std::int64_t d = std::abs (i - target);
-                if (d < bestDist)
-                {
-                    bestDist = d;
-                    bestIdx  = i;
-                }
-            }
+        // Walk outward from the target and stop at the first crossing — audio
+        // crosses zero every few dozen samples, so this exits far earlier than
+        // scanning the whole ±radius window. Left side first on equal distance
+        // (matches the previous full-scan tie-break). The explicit bound also
+        // covers a target outside [lo, hi] (e.g. target 0 with lo clamped to 1).
+        const std::int64_t maxDist = std::max (target - lo, hi - target);
+        for (std::int64_t dist = 0; dist <= maxDist; ++dist)
+        {
+            const std::int64_t left = target - dist;
+            if (left >= lo && left <= hi && crossesAt (left))
+                return left;
+
+            const std::int64_t right = target + dist;
+            if (dist > 0 && right >= lo && right <= hi && crossesAt (right))
+                return right;
         }
-        return bestIdx;
+        return target;
     }
 } // namespace switchblade::analysis

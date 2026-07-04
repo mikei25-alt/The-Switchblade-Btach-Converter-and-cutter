@@ -40,7 +40,8 @@ namespace switchblade::analysis
             float sensitivity         { 1.0f };    // < 1 strict, > 1 permissive
         };
 
-        explicit TextureAnalyzer (Params p = {}) noexcept : params_ (p) {}
+        TextureAnalyzer() noexcept : TextureAnalyzer (Params()) {}
+        explicit TextureAnalyzer (Params p) noexcept : params_ (p) {}
 
         /** Same return type as TransientDetector::detect — drop-in replacement. */
         [[nodiscard]] std::vector<Transient> analyze (const AudioFile& file) const;

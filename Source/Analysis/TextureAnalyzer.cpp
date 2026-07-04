@@ -144,25 +144,24 @@ namespace switchblade::analysis
             std::round (params_.stabilityWindowSec * sr
                        / static_cast<double> (hop))));
 
-        // Reference scale: max centroid std-dev across the whole file.
-        // RingVariance gives O(1) per frame instead of O(window) with erase().
-        float maxStdDev = 1.0f;
-        {
-            RingVariance rv (stabilityWinFrames);
-            for (std::size_t f = 0; f < numFrames; ++f)
-                maxStdDev = std::max (maxStdDev, rv.push (centVec[f]));
-        }
-
+        // One RingVariance pass (O(1) per frame): store the windowed std-dev
+        // curve while tracking its max (the reference scale), then derive the
+        // stability curve — instead of running the identical window twice.
         std::vector<float> stabilityVec (numFrames);
         {
-            const float effThreshold = params_.stabilityThreshold
-                                     / std::max (0.1f, params_.sensitivity);
+            float maxStdDev = 1.0f;
             RingVariance rv (stabilityWinFrames);
             for (std::size_t f = 0; f < numFrames; ++f)
             {
-                const float sd = rv.push (centVec[f]);
-                stabilityVec[f] = 1.0f - std::min (1.0f, sd / maxStdDev / effThreshold);
+                stabilityVec[f] = rv.push (centVec[f]);   // raw sd for now
+                maxStdDev = std::max (maxStdDev, stabilityVec[f]);
             }
+
+            const float effThreshold = params_.stabilityThreshold
+                                     / std::max (0.1f, params_.sensitivity);
+            const float invScale = 1.0f / (maxStdDev * effThreshold);
+            for (std::size_t f = 0; f < numFrames; ++f)
+                stabilityVec[f] = 1.0f - std::min (1.0f, stabilityVec[f] * invScale);
         }
 
         // ---- Detect stable-region starts ---------------------------------

@@ -29,7 +29,10 @@ namespace switchblade::analysis
             int hopSize  { 512 };   // ~11.6 ms at 44.1 kHz
         };
 
-        explicit SpectralFlux (Config cfg = {});
+        // Split default-arg ctor in two: GCC rejects `Config cfg = {}` for a
+        // nested aggregate with NSDMIs inside the enclosing class definition.
+        SpectralFlux() : SpectralFlux (Config()) {}
+        explicit SpectralFlux (Config cfg);
 
         /** Run across an entire mono buffer, returning the novelty curve.
             One output sample per hop. */

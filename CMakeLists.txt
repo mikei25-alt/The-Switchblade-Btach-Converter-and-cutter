@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 project(Switchblade
     VERSION 0.1.0
     DESCRIPTION "The Switchblade — intelligent batch one-shot extractor"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)   # C: googletest enables it in a subdirectory, which breaks
+                       # Ninja generation unless the language exists at top level
 
 # -----------------------------------------------------------------------------
 # Language / toolchain
@@ -131,7 +132,9 @@ target_compile_definitions(Switchblade PRIVATE
 set_target_properties(SwitchbladeCore SwitchbladeUI PROPERTIES
     COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Switchblade_artefacts/$<CONFIG>")
 
-target_link_options(Switchblade PRIVATE /ignore:4099)   # PDB not co-located with static libs — debug via sub-project
+if(MSVC)
+    target_link_options(Switchblade PRIVATE /ignore:4099)   # PDB not co-located with static libs — debug via sub-project
+endif()
 
 target_link_libraries(Switchblade
     PRIVATE

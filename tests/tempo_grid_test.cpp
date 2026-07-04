@@ -72,6 +72,25 @@ TEST (TempoGrid, DetectsFourOnTheFloorTempo)
     EXPECT_GT (est.confidence, 0.0f);
 }
 
+// The estimator must hold across the musically common range, not just 120.
+// Fast tempos are the octave-error danger zone: a 174 BPM kick train is also
+// a valid 87 BPM description, and the unbiased autocorrelation treats both
+// nearly equally — the harmonic-reinforcement + prior combination has to
+// settle it the right way.
+TEST (TempoGrid, DetectsTempoAcrossCommonRange)
+{
+    for (const double bpm : { 90.0, 100.0, 128.0, 140.0, 160.0, 174.0 })
+    {
+        const auto x   = fourOnTheFloor (bpm, 24);
+        const auto est = TempoEstimator {}.estimate (
+            std::span<const float> (x.data(), x.size()), kSR);
+
+        ASSERT_TRUE (est.valid()) << "no estimate at " << bpm << " BPM";
+        EXPECT_NEAR (est.bpm, bpm, bpm * 0.03)
+            << "detected " << est.bpm << " BPM, expected " << bpm;
+    }
+}
+
 TEST (TempoGrid, QuarterGridSlicesWholeFileNotIntoFourChunks)
 {
     const double bpm       = 120.0;

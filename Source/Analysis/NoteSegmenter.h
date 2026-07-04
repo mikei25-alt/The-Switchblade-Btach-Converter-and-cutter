@@ -69,6 +69,27 @@ namespace switchblade::analysis
             globalPeak = std::max (globalPeak, std::abs (v));
         const float noiseFloor = globalPeak * std::pow (10.0f, silenceDb / 20.0f);
 
+        // Per-hop energy prefix sums: frame RMS in O(1) instead of re-summing
+        // the 75%-overlapping 2048-sample window per hop. Frame starts and the
+        // frame length are hop-aligned (frameSize is a multiple of hopSize),
+        // so per-hop granularity is exact and the table stays tiny (one double
+        // per hop rather than per sample).
+        static_assert (frameSize % hopSize == 0,
+                       "frame RMS via per-hop prefix sums requires hop-aligned frames");
+        const int hopsPerFrame = frameSize / hopSize;
+        const int numHops      = totalS / hopSize;
+        std::vector<double> hopEnergyPrefix (static_cast<std::size_t> (numHops) + 1, 0.0);
+        for (int h = 0; h < numHops; ++h)
+        {
+            double acc = 0.0;
+            const int base = h * hopSize;
+            for (int i = 0; i < hopSize; ++i)
+                acc += static_cast<double> (mono[static_cast<std::size_t> (base + i)])
+                     * static_cast<double> (mono[static_cast<std::size_t> (base + i)]);
+            hopEnergyPrefix[static_cast<std::size_t> (h) + 1] =
+                hopEnergyPrefix[static_cast<std::size_t> (h)] + acc;
+        }
+
         // ── Per-frame pitch/RMS analysis ─────────────────────────────────────
         struct Frame { float rms { 0.0f }; float f0Hz { 0.0f }; float clarity { 0.0f }; };
 
@@ -81,10 +102,12 @@ namespace switchblade::analysis
         for (int pos = 0; pos + frameSize <= totalS; pos += hopSize)
         {
             Frame fr;
-            float sum = 0.0f;
-            for (int i = 0; i < frameSize; ++i)
-                sum += mono[pos + i] * mono[pos + i];
-            fr.rms = std::sqrt (sum / static_cast<float> (frameSize));
+            const int h0 = pos / hopSize;
+            const double sum =
+                hopEnergyPrefix[static_cast<std::size_t> (h0 + hopsPerFrame)]
+                - hopEnergyPrefix[static_cast<std::size_t> (h0)];
+            fr.rms = static_cast<float> (
+                std::sqrt (sum / static_cast<double> (frameSize)));
 
             if (fr.rms >= noiseFloor)
             {

@@ -57,6 +57,13 @@ namespace switchblade::analysis
         std::vector<Feature> feats;
         feats.reserve (static_cast<std::size_t> (n));
 
+        // Hoisted channel pointers — avoids a getSample() address computation
+        // per sample per channel in the hot feature loop below.
+        std::vector<const float*> chans (static_cast<std::size_t> (std::max (1, numCh)));
+        for (int c = 0; c < numCh; ++c)
+            chans[static_cast<std::size_t> (c)] = file.samples.getReadPointer (c);
+        const float invCh = 1.0f / static_cast<float> (std::max (1, numCh));
+
         double maxRms = 0.0;
         for (int i = 0; i < n; ++i)
         {
@@ -75,8 +82,8 @@ namespace switchblade::analysis
             {
                 float m = 0.0f;
                 for (int c = 0; c < numCh; ++c)
-                    m += file.samples.getSample (c, static_cast<int> (s + k));
-                m /= static_cast<float> (std::max (1, numCh));
+                    m += chans[static_cast<std::size_t> (c)][s + k];
+                m *= invCh;
                 sumSq += static_cast<double> (m) * static_cast<double> (m);
                 if (k > 0 && ((m >= 0.0f) != (prev >= 0.0f)))
                     ++zc;

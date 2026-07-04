@@ -105,6 +105,7 @@ namespace switchblade::analysis
                 return out;   // silence / DC — no pulse to find
 
             // Phase anchor: first window with a clear onset (> 25 % of peak).
+            // Found on the raw novelty, before the smoothing below widens it.
             std::int64_t firstBeatFrame = 0;
             for (std::int64_t f = 1; f < numFrames; ++f)
             {
@@ -113,6 +114,23 @@ namespace switchblade::analysis
                     firstBeatFrame = f;
                     break;
                 }
+            }
+
+            // Smooth the novelty with a 3-point Hann kernel. A beat period that
+            // is a non-integer number of frames (e.g. 150 BPM at 512-hop =
+            // 34.45 frames) otherwise splits its autocorrelation peak across
+            // two lag bins, halving it — which loses to the sharper peak at
+            // DOUBLE the period and produces a classic half-tempo error.
+            // Widening each onset spike keeps the peak mass in one bin.
+            {
+                std::vector<double> smoothed (novelty.size());
+                smoothed[0] = novelty[0];
+                for (std::size_t f = 1; f + 1 < smoothed.size(); ++f)
+                    smoothed[f] = 0.25 * novelty[f - 1]
+                                + 0.50 * novelty[f]
+                                + 0.25 * novelty[f + 1];
+                smoothed[smoothed.size() - 1] = novelty[novelty.size() - 1];
+                novelty = std::move (smoothed);
             }
 
             // Mean-remove so the autocorrelation reflects periodicity, not the
@@ -139,13 +157,16 @@ namespace switchblade::analysis
             if (energyZero <= 0.0)
                 return out;
 
+            // Unbiased estimate: dividing by the overlap length removes the
+            // inherent bias of raw autocorrelation towards short lags (fast
+            // tempos), which simply accumulate more product terms.
             const auto autocorrAt = [&] (std::int64_t lag)
             {
                 double acc = 0.0;
                 for (std::int64_t f = 0; f + lag < numFrames; ++f)
                     acc += novelty[static_cast<std::size_t> (f)]
                          * novelty[static_cast<std::size_t> (f + lag)];
-                return acc;
+                return acc / static_cast<double> (numFrames - lag);
             };
 
             // Perceptual tempo prior — weights each lag by how musically
@@ -165,8 +186,18 @@ namespace switchblade::analysis
             std::int64_t bestLag = 0;
             for (std::int64_t lag = lagMin; lag <= lagMax; ++lag)
             {
-                const double acc   = autocorrAt (lag);
-                const double score = acc * tempoWeight (lag);
+                const double acc = autocorrAt (lag);
+
+                // Harmonic reinforcement: the true beat period is also periodic
+                // at twice its lag, while a spurious half-period peak (double
+                // tempo) has no support at ITS double. Adding 0.5 * acf(2*lag)
+                // disambiguates octave errors that the log-Gaussian prior alone
+                // can't always settle.
+                double support = acc;
+                if (2 * lag < numFrames - 1)
+                    support += 0.5 * autocorrAt (2 * lag);
+
+                const double score = support * tempoWeight (lag);
                 if (score > bestScore)
                 {
                     bestScore = score;
@@ -176,6 +207,39 @@ namespace switchblade::analysis
             }
             if (bestLag <= 0 || bestRaw <= 0.0)
                 return out;
+
+            // ── Octave disambiguation ────────────────────────────────────────
+            // A pulse train with period P has near-equal autocorrelation at P
+            // and 2P, and a backbeat (kick 1/3, snare 2/4) even peaks at the
+            // bar level; the log-Gaussian prior then often keeps the half-tempo
+            // reading. If the winner's HALF lag carries substantial support,
+            // events repeat at the half period too: take the faster, denser
+            // reading. Threshold calibration on synthetic material: when the
+            // winner is a spurious double period the true beat shows >= 0.57 of
+            // its correlation; a genuinely subordinate half period (eighth-note
+            // hats under a backbeat) shows <= 0.20 — so 0.45 splits the gap
+            // with margin on both sides. Staying above lagMin keeps the result
+            // inside the configured BPM band.
+            {
+                std::int64_t bestHalf    = 0;
+                double       bestHalfAcc = -1.0;
+                // Floor and ceiling of bestLag/2 — one candidate when even.
+                const std::int64_t halfLo = bestLag / 2;
+                const std::int64_t halfHi = (bestLag + 1) / 2;
+                for (std::int64_t cand = halfLo; cand <= halfHi; ++cand)
+                {
+                    if (cand >= lagMin && cand < numFrames)
+                    {
+                        const double a = autocorrAt (cand);
+                        if (a > bestHalfAcc) { bestHalfAcc = a; bestHalf = cand; }
+                    }
+                }
+                if (bestHalf > 0 && bestHalfAcc >= 0.45 * bestRaw)
+                {
+                    bestLag = bestHalf;
+                    bestRaw = bestHalfAcc;
+                }
+            }
 
             // ── 4. Refine the lag to the sub-frame peak by parabolic interp ──
             double refinedLag = static_cast<double> (bestLag);
@@ -196,8 +260,11 @@ namespace switchblade::analysis
             out.beatPeriodSamples = refinedLag * static_cast<double> (hop);
             out.bpm               = 60.0 * sampleRate / out.beatPeriodSamples;
             out.firstBeatSample   = firstBeatFrame * static_cast<std::int64_t> (hop);
+            // Both sides are per-term averages now: bestRaw is the unbiased
+            // acf and energyZero/numFrames is the unbiased acf at lag 0.
             out.confidence        = static_cast<float> (
-                std::clamp (bestRaw / energyZero, 0.0, 1.0));
+                std::clamp (bestRaw * static_cast<double> (numFrames) / energyZero,
+                            0.0, 1.0));
             return out;
         }
 

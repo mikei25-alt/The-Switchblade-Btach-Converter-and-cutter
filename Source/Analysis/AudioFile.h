@@ -106,17 +106,24 @@ namespace switchblade::analysis
     {
         const auto numCh = src.getNumChannels();
         const auto numS  = src.getNumSamples();
-        mono.assign (static_cast<std::size_t> (numS), 0.0f);
 
         if (numCh <= 0 || numS <= 0)
+        {
+            mono.assign (static_cast<std::size_t> (numS), 0.0f);
             return;
+        }
 
+        if (numCh == 1)   // straight copy — the overwhelmingly common case
+        {
+            const auto* r = src.getReadPointer (0);
+            mono.assign (r, r + numS);
+            return;
+        }
+
+        mono.assign (static_cast<std::size_t> (numS), 0.0f);
         const float gain = 1.0f / static_cast<float> (numCh);
         for (int ch = 0; ch < numCh; ++ch)
-        {
-            const auto* r = src.getReadPointer (ch);
-            for (int i = 0; i < numS; ++i)
-                mono[static_cast<std::size_t> (i)] += r[i] * gain;
-        }
+            juce::FloatVectorOperations::addWithMultiply (
+                mono.data(), src.getReadPointer (ch), gain, numS);
     }
 } // namespace switchblade::analysis

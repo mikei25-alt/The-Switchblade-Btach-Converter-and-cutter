@@ -2,8 +2,11 @@
 
 #include "AudioFile.h"
 
+#include <juce_dsp/juce_dsp.h>
+
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -47,11 +50,15 @@ namespace switchblade::analysis
             float noiseFloor { 0.0056f }; // ~ -45 dBFS — skip detection below this peak
         };
 
-        explicit PitchDetector (Config cfg = {}) noexcept : cfg_ (cfg) {}
+        PitchDetector() noexcept : PitchDetector (Config()) {}
+        explicit PitchDetector (Config cfg) noexcept : cfg_ (cfg) {}
 
-        /** Analyse a mono audio frame. sampleRate must match the source. */
+        /** Analyse a mono audio frame. sampleRate must match the source.
+            Non-const: reuses the internal FFT workspace across calls, so a
+            PitchDetector instance must not be shared between threads — every
+            call site constructs its own local instance. */
         [[nodiscard]] std::optional<PitchResult>
-        detect (std::span<const float> frame, double sampleRate) const noexcept;
+        detect (std::span<const float> frame, double sampleRate) noexcept;
 
         /** Convert Hz to a note name string, e.g. "A4", "C#3". */
         [[nodiscard]] static std::string noteNameFromHz (float hz) noexcept;
@@ -71,6 +78,87 @@ namespace switchblade::analysis
 
     private:
         Config cfg_;
+
+        // FFT workspace for the O(W log W) difference function. Lazily built,
+        // reused across detect() calls of the same size (the common case for
+        // file-wide scans).
+        std::unique_ptr<juce::dsp::FFT> fft_;
+        int                             fftOrder_ { -1 };
+        std::vector<float>              fftBuf_;
+
+        // Exact double-precision d(tau) for a single lag — used by the small-
+        // frame path and to re-derive the dip values before interpolation.
+        [[nodiscard]] static double exactDifference (const float* x, int W,
+                                                     int tau) noexcept
+        {
+            double acc = 0.0;
+            for (int j = 0; j < W - tau; ++j)
+            {
+                const double diff = static_cast<double> (x[j])
+                                  - static_cast<double> (x[j + tau]);
+                acc += diff * diff;
+            }
+            return acc;
+        }
+
+        // d(tau) for all lags via FFT autocorrelation:
+        //     d(tau) = P(tau) + Q(tau) - 2 R(tau)
+        // where P/Q are prefix-sum energies of the two overlapping segments and
+        // R is the (linear) autocorrelation, computed with one zero-padded
+        // real FFT round trip. O(W log W) instead of O(W * searchMax).
+        void computeDifferenceFft (const float* x, int W, int searchMax,
+                                   std::vector<float>& dRaw) noexcept
+        {
+            // Prefix energies in double — cheap and immune to cancellation.
+            std::vector<double> energy (static_cast<std::size_t> (W + 1), 0.0);
+            for (int j = 0; j < W; ++j)
+                energy[static_cast<std::size_t> (j + 1)] =
+                    energy[static_cast<std::size_t> (j)]
+                    + static_cast<double> (x[j]) * static_cast<double> (x[j]);
+
+            // Zero-pad past W + searchMax so the circular autocorrelation is
+            // linear for every lag we read.
+            const int needed = W + searchMax + 1;
+            int order = 1;
+            while ((1 << order) < needed)
+                ++order;
+            if (fftOrder_ != order)
+            {
+                fft_      = std::make_unique<juce::dsp::FFT> (order);
+                fftOrder_ = order;
+            }
+            const int N = 1 << order;
+
+            fftBuf_.assign (static_cast<std::size_t> (2 * N), 0.0f);
+            std::copy (x, x + W, fftBuf_.begin());
+
+            fft_->performRealOnlyForwardTransform (fftBuf_.data());
+            for (int k = 0; k < N; ++k)
+            {
+                const float re = fftBuf_[static_cast<std::size_t> (2 * k)];
+                const float im = fftBuf_[static_cast<std::size_t> (2 * k + 1)];
+                fftBuf_[static_cast<std::size_t> (2 * k)]     = re * re + im * im;
+                fftBuf_[static_cast<std::size_t> (2 * k + 1)] = 0.0f;
+            }
+            fft_->performRealOnlyInverseTransform (fftBuf_.data());
+
+            // Normalise against the exact R(0) = total energy, which absorbs
+            // whatever scaling convention the FFT backend uses.
+            const double r0 = static_cast<double> (fftBuf_[0]);
+            const double scale = (r0 > 0.0)
+                ? energy[static_cast<std::size_t> (W)] / r0 : 0.0;
+
+            dRaw[0] = 0.0f;
+            const double totalEnergy = energy[static_cast<std::size_t> (W)];
+            for (int tau = 1; tau <= searchMax; ++tau)
+            {
+                const double p = energy[static_cast<std::size_t> (W - tau)];
+                const double q = totalEnergy - energy[static_cast<std::size_t> (tau)];
+                const double r = scale * static_cast<double> (fftBuf_[static_cast<std::size_t> (tau)]);
+                dRaw[static_cast<std::size_t> (tau)] =
+                    static_cast<float> (std::max (0.0, p + q - 2.0 * r));
+            }
+        }
     };
 
     //==========================================================================
@@ -78,7 +166,7 @@ namespace switchblade::analysis
     //==========================================================================
     inline std::optional<PitchResult>
     PitchDetector::detect (std::span<const float> frame,
-                           double sampleRate) const noexcept
+                           double sampleRate) noexcept
     {
         const int W = std::min (cfg_.frameSize, static_cast<int> (frame.size()));
         if (W < 4)
@@ -100,7 +188,25 @@ namespace switchblade::analysis
         if (tauMin >= searchMax)
             return std::nullopt;
 
-        // Step 1 + 2: difference function + cumulative mean normalisation
+        // Step 1: difference function. Direct evaluation costs W * searchMax
+        // multiplies; the FFT route costs ~3 transforms of the padded size.
+        // Below ~128k direct operations the FFT setup isn't worth it.
+        std::vector<float> dRaw (static_cast<std::size_t> (searchMax + 1), 0.0f);
+        const bool useFft =
+            static_cast<double> (W) * static_cast<double> (searchMax) >= 131072.0;
+
+        if (useFft)
+        {
+            computeDifferenceFft (frame.data(), W, searchMax, dRaw);
+        }
+        else
+        {
+            for (int tau = 1; tau <= searchMax; ++tau)
+                dRaw[static_cast<std::size_t> (tau)] = static_cast<float> (
+                    exactDifference (frame.data(), W, tau));
+        }
+
+        // Step 2: cumulative mean normalisation
         std::vector<float> d (static_cast<std::size_t> (searchMax + 1), 0.0f);
 
         // d[0] = 1 by definition
@@ -109,18 +215,11 @@ namespace switchblade::analysis
         double runningSum = 0.0;
         for (int tau = 1; tau <= searchMax; ++tau)
         {
-            double acc = 0.0;
-            for (int j = 0; j < W - tau; ++j)
-            {
-                const double diff = static_cast<double> (frame[static_cast<std::size_t> (j)])
-                                  - static_cast<double> (frame[static_cast<std::size_t> (j + tau)]);
-                acc += diff * diff;
-            }
-            runningSum += acc;
-            // Cumulative mean normalised difference
+            runningSum += static_cast<double> (dRaw[static_cast<std::size_t> (tau)]);
             d[static_cast<std::size_t> (tau)] =
                 (runningSum > 0.0)
-                ? static_cast<float> (acc * static_cast<double> (tau) / runningSum)
+                ? static_cast<float> (static_cast<double> (dRaw[static_cast<std::size_t> (tau)])
+                                      * static_cast<double> (tau) / runningSum)
                 : 1.0f;
         }
 
@@ -155,6 +254,28 @@ namespace switchblade::analysis
             }
             if (bestVal >= 0.5f) // hopeless — unpitched
                 return std::nullopt;
+        }
+
+        // FFT float round-off is amplified by cancellation right at the dip,
+        // where d(tau) is nearly zero. Re-derive the three dip values with the
+        // exact double-precision difference so the parabolic interpolation
+        // (and the clarity value) keep their full sub-sample precision.
+        if (useFft && bestTau > 0 && bestTau < searchMax)
+        {
+            // Rebuild the cumulative sums for the three dip lags in one pass.
+            double cum = 0.0;
+            for (int tau = 1; tau <= bestTau + 1; ++tau)
+            {
+                cum += static_cast<double> (dRaw[static_cast<std::size_t> (tau)]);
+                if (tau < bestTau - 1)
+                    continue;
+                const double exact = exactDifference (frame.data(), W, tau);
+                d[static_cast<std::size_t> (tau)] =
+                    (cum > 0.0)
+                    ? static_cast<float> (exact * static_cast<double> (tau) / cum)
+                    : 1.0f;
+            }
+            bestVal = d[static_cast<std::size_t> (bestTau)];
         }
 
         // Step 4: parabolic interpolation around bestTau
@@ -251,16 +372,14 @@ namespace switchblade::analysis
         const juce::int64 frameStart = start + attack;
 
         // Mix to mono for analysis
-        const int numCh = file.samples.getNumChannels();
-        std::vector<float> mono (static_cast<std::size_t> (frameLen));
-        for (juce::int64 i = 0; i < frameLen; ++i)
-        {
-            float sum = 0.0f;
-            for (int c = 0; c < numCh; ++c)
-                sum += file.samples.getSample (c, static_cast<int> (frameStart + i));
-            mono[static_cast<std::size_t> (i)] =
-                sum / static_cast<float> (std::max (1, numCh));
-        }
+        const int numCh = std::max (1, file.samples.getNumChannels());
+        const float gain = 1.0f / static_cast<float> (numCh);
+        std::vector<float> mono (static_cast<std::size_t> (frameLen), 0.0f);
+        for (int c = 0; c < numCh; ++c)
+            juce::FloatVectorOperations::addWithMultiply (
+                mono.data(),
+                file.samples.getReadPointer (c) + frameStart,
+                gain, static_cast<int> (frameLen));
 
         PitchDetector::Config cfg;
         cfg.frameSize = static_cast<int> (frameLen);

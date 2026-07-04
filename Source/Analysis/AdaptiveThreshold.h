@@ -18,9 +18,11 @@ namespace switchblade::analysis
     //  where 1.4826 scales MAD to be a consistent estimator of std-dev under
     //  Gaussian noise. Use `k ≈ 1.5 .. 3.0` — higher = fewer false positives.
     //
-    //  Complexity: O(W log W) per sample for simplicity. For real-time loops
-    //  with very long windows, swap in an order-statistic tree; for analysis
-    //  pass (offline), this is fine and keeps the code obvious.
+    //  Complexity: O(W) per sample — both order statistics come from
+    //  std::nth_element on the pre-allocated scratch buffer instead of the
+    //  two full std::sort passes used previously. Output is value-identical:
+    //  the selected elements (index n/2 of the sorted values, then of the
+    //  sorted deviations) are the same order statistics either way.
     //==========================================================================
     class AdaptiveThreshold
     {
@@ -32,7 +34,8 @@ namespace switchblade::analysis
             float       floorAbs   { 0.008f };  // absolute minimum — low enough to catch quiet material (e.g. -60 dBFS triangle dings) while still sitting above digital noise
         };
 
-        explicit AdaptiveThreshold (Params p = {})
+        AdaptiveThreshold() : AdaptiveThreshold (Params()) {}
+        explicit AdaptiveThreshold (Params p)
             : params_ (p), scratch_ (p.windowSize) {}
 
         void reset() noexcept { window_.clear(); }
@@ -55,24 +58,24 @@ namespace switchblade::analysis
             if (n < 4)
                 return params_.floorAbs;
 
-            // Reuse the pre-allocated scratch buffer — no heap alloc per call.
-            // Two sorts on n ≤ 65 elements; sort is the bottleneck, not the alloc.
+            // Median via selection, not a full sort.
             std::copy (window_.begin(), window_.end(), scratch_.begin());
-            std::sort (scratch_.begin(), scratch_.begin() + n);
-            const float median = scratch_[n / 2];
+            const auto mid = scratch_.begin() + static_cast<std::ptrdiff_t> (n / 2);
+            std::nth_element (scratch_.begin(), mid, scratch_.begin() + static_cast<std::ptrdiff_t> (n));
+            const float median = *mid;
 
-            // Reuse the same buffer for MAD deviations (overwrite in-place).
+            // MAD: median of the absolute deviations (same buffer, in place).
             for (std::size_t i = 0; i < n; ++i)
                 scratch_[i] = std::abs (scratch_[i] - median);
-            std::sort (scratch_.begin(), scratch_.begin() + n);
-            const float mad = scratch_[n / 2];
+            std::nth_element (scratch_.begin(), mid, scratch_.begin() + static_cast<std::ptrdiff_t> (n));
+            const float mad = *mid;
 
             return std::max (params_.floorAbs,
                              median + params_.k * 1.4826f * mad);
         }
 
-        Params                    params_;
-        std::deque<float>         window_;
+        Params                     params_;
+        std::deque<float>          window_;
         mutable std::vector<float> scratch_; // pre-sized to windowSize at construction
     };
 } // namespace switchblade::analysis

@@ -43,7 +43,8 @@ namespace switchblade::analysis
             float                      sensitivity    { 0.7f };   // 0.5 = strict, 2.0 = loose — lower for fewer false positives
         };
 
-        explicit TransientDetector (Params p = {}) noexcept : params_ (p) {}
+        TransientDetector() noexcept : TransientDetector (Params()) {}
+        explicit TransientDetector (Params p) noexcept : params_ (p) {}
 
         [[nodiscard]] std::vector<Transient> detect (const AudioFile& file) const;
 

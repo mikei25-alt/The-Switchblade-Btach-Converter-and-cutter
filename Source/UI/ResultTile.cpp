@@ -203,9 +203,10 @@ namespace switchblade::ui
     {
         dragStarted_ = false;
 
-        // Ctrl+click toggles multi-select for "Export Selection" — checked first
-        // so Ctrl+click never fires playback or selection callbacks.
-        if (e.mods.isCtrlDown())
+        // Cmd/Ctrl+click toggles multi-select for "Export Selection" — checked
+        // first so the modifier never fires playback or selection callbacks.
+        // isCommandDown maps to Cmd on macOS and Ctrl on Windows/Linux.
+        if (e.mods.isCommandDown())
         {
             setMultiSelected (! multiSelected_);
             return;
@@ -257,13 +258,16 @@ namespace switchblade::ui
 
     juce::Colour ResultTile::classColour() const noexcept
     {
+        // Same mapping as SampleCard::classificationColour so colour carries
+        // meaning between the card list and the vault (a melodic slice is
+        // magenta in both places, not magenta there and gold here).
         using C = switchblade::analysis::SourceClass;
         switch (classification_)
         {
-            case C::Percussive: return pal::NeonCyan;
-            case C::Melodic:    return pal::NeonGold;
+            case C::Percussive: return pal::NeonGold;
+            case C::Melodic:    return pal::NeonMagenta;
             case C::Texture:    return pal::NeonMint;
-            case C::Grid:       return pal::NeonCyan;   // matches SampleCard Grid badge
+            case C::Grid:       return pal::NeonCyan;
             default:            return pal::TextSecondary;
         }
     }

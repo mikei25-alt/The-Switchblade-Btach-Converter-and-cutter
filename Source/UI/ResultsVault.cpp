@@ -11,6 +11,36 @@ namespace switchblade::ui
         : fmt_   (fmt)
         , cache_ (cache)
     {
+        // Ceremony export button — a real TextButton (hover/pressed feedback,
+        // keyboard focus, accessibility) instead of a painted pill whose hit
+        // target was silently the whole bar.
+        exportBtn_.onClick = [this]
+        {
+            if (onExportCollection) onExportCollection();
+        };
+        exportBtn_.setTooltip ("Export every slice in the vault.");
+        addChildComponent (exportBtn_);   // shown by the completion ceremony
+
+        // "Trash Compactor" — clears the vault after a one-item confirm menu
+        // so a stray click can't silently destroy a curated selection.
+        clearBtn_.onClick = [this]
+        {
+            const int n = tileCount() + pendingCount();
+            if (n == 0) return;
+            juce::PopupMenu menu;
+            menu.addItem (1, "Clear all " + juce::String (n) + " tiles");
+            menu.showMenuAsync (
+                juce::PopupMenu::Options{}.withTargetComponent (&clearBtn_),
+                [this] (int result)
+                {
+                    if (result == 1 && onClearRequested)
+                        onClearRequested();
+                });
+        };
+        clearBtn_.setTooltip ("Remove every tile from the vault "
+                              "(source cards are kept).");
+        addChildComponent (clearBtn_);
+
         setSize (300, kBadgeH + kGap);
     }
 
@@ -267,6 +297,28 @@ namespace switchblade::ui
         }
 
         setSize (viewW_, computeHeight());
+
+        // CLEAR sits at the right end of the badge bar, visible only when
+        // there is something to clear.
+        clearBtn_.setBounds (viewW_ - 66, 4, 60, kBadgeH - 8);
+        clearBtn_.setVisible (n > 0 || ! pending_.empty());
+
+        // Export button rides the ceremony bar's slide-in (relayout runs on
+        // every animation tick while the ceremony is in progress).
+        if (allDone_)
+        {
+            const int   contentH = computeHeight() - kExportBarH;
+            const float slideOff = static_cast<float> (kExportBarH)
+                                 * (1.0f - ceremonyPhase_);
+            const int   barY     = contentH + static_cast<int> (slideOff);
+            exportBtn_.setBounds (viewW_ / 2 - 95,
+                                  barY + kExportBarH / 2 + 2, 190, 24);
+            exportBtn_.setVisible (true);
+        }
+        else
+        {
+            exportBtn_.setVisible (false);
+        }
     }
 
     int ResultsVault::tileW() const noexcept
@@ -292,19 +344,6 @@ namespace switchblade::ui
     void ResultsVault::resized()
     {
         relayout();
-    }
-
-    void ResultsVault::mouseDown (const juce::MouseEvent& e)
-    {
-        if (! allDone_ || ceremonyPhase_ < 0.5f) return;
-
-        // Hit-test the export bar (bottom kExportBarH px)
-        const int barTop = getHeight() - kExportBarH;
-        if (e.getPosition().getY() >= barTop)
-        {
-            if (onExportCollection)
-                onExportCollection();
-        }
     }
 
     //==========================================================================
@@ -424,10 +463,9 @@ namespace switchblade::ui
                 g.drawLine (lx, by, lx + 14.0f, by, 1.4f);
             }
 
-            const float cy = barY + barH * 0.5f;
-            const float cx = barW * 0.5f;
-
-            // Stamp text — "✦ N SAMPLES READY"  (uses outer `n` = tiles_.size())
+            // Stamp text — "✦ N SAMPLES READY"  (uses outer `n` = tiles_.size()).
+            // The EXPORT COLLECTION control below it is a real TextButton
+            // (exportBtn_, positioned in relayout), not painted here.
             {
                 const juce::String stamp =
                     juce::String (juce::CharPointer_UTF8 ("\xe2\x9c\xa6"))
@@ -441,32 +479,6 @@ namespace switchblade::ui
                             juce::Rectangle<float> (30.0f, barY + 4.0f,
                                                     barW - 60.0f, 18.0f).toNearestInt(),
                             juce::Justification::centred, false);
-            }
-
-            // Export button pill — "◉ EXPORT COLLECTION"
-            {
-                const float pillW = 190.0f;
-                const float pillH = 22.0f;
-                const juce::Rectangle<float> pill {
-                    cx - pillW * 0.5f, cy + 4.0f, pillW, pillH };
-
-                // Pill fill
-                juce::ColourGradient pg {
-                    pal::NeonGold.withAlpha (0.22f * alpha), pill.getX(), pill.getY(),
-                    pal::NeonGold.withAlpha (0.08f * alpha), pill.getX(), pill.getBottom(), false };
-                g.setGradientFill (pg);
-                g.fillRoundedRectangle (pill, 5.0f);
-
-                // Pill border
-                g.setColour (pal::NeonGold.withAlpha (0.65f * alpha));
-                g.drawRoundedRectangle (pill, 5.0f, 1.2f);
-
-                // Button text
-                g.setFont (juce::Font (juce::FontOptions { 10.5f }.withStyle ("Bold")));
-                g.setColour (pal::NeonGold.withAlpha (alpha));
-                g.drawText (juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x89"))
-                            + "  EXPORT COLLECTION",
-                            pill.toNearestInt(), juce::Justification::centred, false);
             }
         }
     }

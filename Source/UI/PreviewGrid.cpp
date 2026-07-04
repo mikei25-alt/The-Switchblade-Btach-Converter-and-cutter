@@ -222,10 +222,14 @@ namespace switchblade::ui
 
     int PreviewGrid::padAt (juce::Point<int> p) const
     {
-        const int col = p.x / (getWidth()  / kCols);
-        const int row = p.y / (getHeight() / kRows);
-        if (col < 0 || col >= kCols || row < 0 || row >= kRows)
+        // Proportional mapping — dividing by an integer pad size left
+        // unclickable strips at the right/bottom edges whenever the panel
+        // size wasn't an exact multiple of 4.
+        if (getWidth() <= 0 || getHeight() <= 0
+            || p.x < 0 || p.y < 0 || p.x >= getWidth() || p.y >= getHeight())
             return -1;
+        const int col = std::min (kCols - 1, p.x * kCols / getWidth());
+        const int row = std::min (kRows - 1, p.y * kRows / getHeight());
         return row * kCols + col;
     }
 

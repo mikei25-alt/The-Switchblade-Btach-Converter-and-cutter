@@ -566,6 +566,11 @@ namespace switchblade::analysis
                 result.transients = std::move (kept);
             }
 
+            // Hand the already-loaded audio to the UI so the message thread
+            // doesn't have to re-read the file from disk.
+            result.audio = std::make_shared<const switchblade::analysis::AudioFile> (
+                std::move (*file));
+
             dispatch (std::move (result));
             return jobHasFinished;
         }

@@ -49,6 +49,8 @@ namespace switchblade::ui
     void SampleCard::setFile (AudioFilePtr file)
     {
         file_ = std::move (file);
+        failed_ = false;
+        failReason_.clear();
         monoCache_.clear();
         viewStart_ = 0.0;
         viewEnd_   = 1.0;
@@ -102,6 +104,16 @@ namespace switchblade::ui
     void SampleCard::setLoading (bool isLoading) noexcept
     {
         loading_ = isLoading;
+        if (isLoading)
+            failed_ = false;   // a retry in flight supersedes the failed state
+        repaint();
+    }
+
+    void SampleCard::setFailed (const juce::String& reason)
+    {
+        failed_     = true;
+        failReason_ = reason;
+        loading_    = false;
         repaint();
     }
 
@@ -332,6 +344,31 @@ namespace switchblade::ui
             g.drawRoundedRectangle (inner, 8.0f, 1.8f);
         }
 
+        // ----- Failed state (crimson) -------------------------------------
+        // Painted in place of a waveform (failed cards have no file_), with
+        // the reason so a batch failure is diagnosable without scrollback.
+        if (failed_)
+        {
+            g.setColour (pal::NeonCrimson.withAlpha (0.65f));
+            g.drawRoundedRectangle (inner, 8.0f, 1.6f);
+
+            const auto msgArea = inner.toNearestInt()
+                                      .withTrimmedTop (kHeaderH)
+                                      .reduced (kHorizontalPad, 2);
+            g.setColour (pal::NeonCrimson);
+            g.setFont (juce::Font (juce::FontOptions { 14.0f }).boldened());
+            g.drawFittedText ("ANALYSIS FAILED",
+                              msgArea.withTrimmedBottom (msgArea.getHeight() / 2),
+                              juce::Justification::centredBottom, 1);
+            g.setColour (pal::TextSecondary);
+            g.setFont (juce::Font (juce::FontOptions { 11.0f }));
+            g.drawFittedText (failReason_.isNotEmpty()
+                                  ? failReason_
+                                  : juce::String ("The file could not be analysed."),
+                              msgArea.withTrimmedTop (msgArea.getHeight() / 2 + 4),
+                              juce::Justification::centredTop, 2);
+        }
+
         // ----- Loading overlay (ANALYZING…) ------------------------------
         if (loading_)
         {
@@ -482,16 +519,21 @@ namespace switchblade::ui
 
         // ── Zoom overlay ──────────────────────────────────────────────────────
         const double range = viewEnd_ - viewStart_;
-        if (range < 0.999)
+        if (range >= 0.999)
+        {
+            zoomBadgeBounds_ = {};   // nothing to click when unzoomed
+        }
+        else
         {
             const float zoom = static_cast<float> (1.0 / range);
 
-            // Zoom badge — top-right corner
+            // Zoom badge — top-right corner. Clicking it resets to full view.
             const juce::String zoomStr =
                 (zoom < 10.0f ? juce::String (zoom, 1) : juce::String (static_cast<int> (zoom)))
                 + juce::String (juce::CharPointer_UTF8 ("\xc3\x97"));  // UTF-8 "×"
 
             const auto badgeR = r.removeFromRight (38).removeFromTop (16).reduced (2, 1);
+            zoomBadgeBounds_ = badgeR;   // cache for the mouseDown reset hit-test
             g.setColour (pal::ChromeVoid.withAlpha (0.72f));
             g.fillRoundedRectangle (badgeR.toFloat(), 3.0f);
             g.setColour (pal::NeonGold);
@@ -567,9 +609,12 @@ namespace switchblade::ui
             return;
         }
 
-        // Ctrl+click always toggles multi-select — checked BEFORE hitTestMarker
-        // so clicking near a marker with Ctrl held selects rather than dragging.
-        if (e.mods.isCtrlDown())
+        // Cmd/Ctrl+click always toggles multi-select — checked BEFORE
+        // hitTestMarker so clicking near a marker with the modifier held
+        // selects rather than dragging. isCommandDown maps to Cmd on macOS
+        // (where Ctrl+click is the popup gesture, already handled above) and
+        // Ctrl on Windows/Linux.
+        if (e.mods.isCommandDown())
         {
             setMultiSelected (! multiSelected_);
             return;
@@ -602,6 +647,25 @@ namespace switchblade::ui
             return;
         }
 
+        const bool zoomed = (viewEnd_ - viewStart_) < 0.999;
+
+        // Zoom badge → reset to full view (replaces the old double-click
+        // reset, which now edits markers instead).
+        if (zoomed && zoomBadgeBounds_.contains (e.getPosition()))
+        {
+            viewStart_ = 0.0;
+            viewEnd_   = 1.0;
+            isPanning_ = false;
+            repaint();
+            return;
+        }
+
+        // Drag-out to the OS/DAW is armed only when the press begins on the
+        // header grip (filename strip) — a sloppy click-to-select on the body
+        // must never turn into a surprise OS file drag.
+        dragOutArmed_ = file_ != nullptr
+                     && headerBounds().contains (e.getPosition());
+
         const int hit = hitTestMarker (p);
 
         if (hit >= 0)
@@ -613,7 +677,6 @@ namespace switchblade::ui
         else
         {
             // If zoomed, drag on the waveform background pans the view
-            const bool zoomed = (viewEnd_ - viewStart_) < 0.999;
             if (zoomed && waveformBounds().toFloat().contains (p))
             {
                 isPanning_ = true;
@@ -631,10 +694,12 @@ namespace switchblade::ui
     void SampleCard::mouseDrag (const juce::MouseEvent& e)
     {
         // ── Drag-out to DAW ────────────────────────────────────────────────────
-        // Fires once per gesture, only when we're not already busy with another
-        // drag interaction (marker nudge or pan). 8 px threshold matches the
+        // Fires once per gesture, only when the press started on the header
+        // grip (see mouseDown) and we're not already busy with another drag
+        // interaction (marker nudge or pan). 8 px threshold matches the
         // OS-typical click-vs-drag boundary while still feeling responsive.
         if (! dragOutFired_
+            && dragOutArmed_
             && draggingIdx_ < 0
             && ! isPanning_
             && file_
@@ -712,28 +777,112 @@ namespace switchblade::ui
     void SampleCard::mouseExit (const juce::MouseEvent&)
     {
         hovered_ = false;
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        if (badgeHovered_)
+        {
+            badgeHovered_ = false;
+            repaint (headerBounds());
+        }
+    }
+
+    void SampleCard::mouseMove (const juce::MouseEvent& e)
+    {
+        // Cursor affordances: pointing hand over the clickable spots, grab
+        // hand over the header grip (the drag-out zone). paintHeader's badge
+        // highlight only refreshes on hover TRANSITIONS — the card doesn't
+        // repaint on every mouse move (setRepaintsOnMouseActivity is off).
+        const bool overBadge = badgeBounds_.contains (e.getPosition());
+        const bool overPlay  = file_ != nullptr
+                            && playBtnBounds().toFloat().contains (e.position);
+        const bool zoomed    = (viewEnd_ - viewStart_) < 0.999;
+        const bool overZoom  = zoomed && zoomBadgeBounds_.contains (e.getPosition());
+        const bool overGrip  = file_ != nullptr
+                            && headerBounds().contains (e.getPosition())
+                            && ! overBadge && ! overPlay;
+
+        if (overBadge || overPlay || overZoom)
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        else if (overGrip)
+            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        else
+            setMouseCursor (juce::MouseCursor::NormalCursor);
+
+        if (overBadge != badgeHovered_)
+        {
+            badgeHovered_ = overBadge;
+            repaint (headerBounds());
+        }
     }
 
     void SampleCard::mouseDoubleClick (const juce::MouseEvent& e)
     {
-        // Double-click on waveform area resets zoom to full view
-        if (waveformBounds().toFloat().contains (e.position))
+        // Double-click edits slice markers: on a marker deletes it, on empty
+        // waveform adds one (zero-crossing snapped). Zoom reset lives on the
+        // zoom badge (see mouseDown).
+        if (! file_ || ! waveformBounds().toFloat().contains (e.position))
+            return;
+
+        const int hit = hitTestMarker (e.position);
+        if (hit >= 0)
         {
-            viewStart_ = 0.0;
-            viewEnd_   = 1.0;
-            isPanning_ = false;
+            transients_.erase (transients_.begin() + hit);
+            draggingIdx_ = -1;   // the preceding mouseDown grabbed this marker
+            if (onMarkerMoved)
+                onMarkerMoved (-1, 0);   // owner re-finalises all boundaries
             repaint();
+            return;
         }
+
+        // Slice Count Ceiling — never let manual editing exceed 64 markers.
+        if (static_cast<int> (transients_.size()) >= 64)
+            return;
+
+        rebuildMonoCache();
+        const juce::int64 raw = sampleForX (e.position.x);
+        const double sr = file_->sampleRate;
+        juce::int64 snapped = raw;
+        if (! monoCache_.empty())
+        {
+            const juce::int64 snapRadius = static_cast<juce::int64> (
+                std::llround (0.005 * sr));   // 5 ms — same as marker drags
+            snapped = switchblade::analysis::snapToZeroCrossing (
+                std::span<const float> (monoCache_.data(), monoCache_.size()),
+                raw, snapRadius);
+        }
+
+        switchblade::analysis::Transient t;
+        t.sampleIndex    = snapped;
+        t.rawSampleIndex = raw;
+        t.timeSeconds    = static_cast<double> (snapped) / sr;
+        t.confidence     = 1.0f;   // user-placed — fully certain
+
+        const auto at = std::lower_bound (
+            transients_.begin(), transients_.end(), t,
+            [] (const auto& a, const auto& b) { return a.sampleIndex < b.sampleIndex; });
+        transients_.insert (at, t);
+
+        if (onMarkerMoved)
+            onMarkerMoved (-1, 0);   // owner re-finalises all boundaries
+        repaint();
     }
 
     void SampleCard::mouseWheelMove (const juce::MouseEvent& e,
                                      const juce::MouseWheelDetails& wheel)
     {
+        // Plain wheel scrolls the surrounding card list (DAW convention);
+        // Cmd/Ctrl+wheel zooms the waveform. Without this split, crossing a
+        // waveform while scrolling the list hijacks the gesture.
+        if (! e.mods.isCommandDown())
+        {
+            juce::Component::mouseWheelMove (e, wheel);   // bubble to viewport
+            return;
+        }
+
         if (! file_ || file_->samples.getNumSamples() <= 0)
             return;
 
         const auto wf = waveformBounds().toFloat();
-        if (! wf.contains (e.position))
+        if (! wf.contains (e.position) || wf.getWidth() <= 0.0f)
             return;
 
         const double oldRange = viewEnd_ - viewStart_;
@@ -744,12 +893,14 @@ namespace switchblade::ui
                                     file_->samples.getNumSamples()), 0.001);
         const double newRange = std::clamp (oldRange * factor, minRange, 1.0);
 
-        // Keep the position under the cursor fixed while zooming
-        const double cursorFrac = viewStart_
-            + (static_cast<double> (e.position.x - wf.getX()) / wf.getWidth())
-              * oldRange;
+        // Keep the audio position under the cursor fixed while zooming: the
+        // cursor keeps pointing at the same fraction of the new view.
+        const double relX = std::clamp (
+            static_cast<double> (e.position.x - wf.getX()) / wf.getWidth(),
+            0.0, 1.0);
+        const double cursorFrac = viewStart_ + relX * oldRange;
 
-        viewStart_ = std::clamp (cursorFrac - newRange * 0.5, 0.0, 1.0 - newRange);
+        viewStart_ = std::clamp (cursorFrac - relX * newRange, 0.0, 1.0 - newRange);
         viewEnd_   = viewStart_ + newRange;
 
         repaint();

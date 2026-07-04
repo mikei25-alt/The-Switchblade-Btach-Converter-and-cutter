@@ -54,12 +54,24 @@ namespace switchblade::ui
         /** Show "ANALYZING…" pulsing overlay when the background job is running. */
         void setLoading (bool isLoading) noexcept;
 
+        /** Mark this card as failed (analysis error, unreadable file, …).
+            The card shows a crimson FAILED state with the reason instead of a
+            waveform. Cleared by setFile() when a later attempt succeeds. */
+        void setFailed (const juce::String& reason);
+
         /** Reflect the current global normalization setting on this card's waveform.
             Pass 0 to hide the badge; pass e.g. -3.0f to show "⊕ -3dB". */
         void setNormDb (float db) noexcept { if (normDb_ == db) return; normDb_ = db; repaint (waveformBounds()); }
 
         /** Set the display path before audio is loaded (for pending-card flow). */
         void setDisplayPath (const std::filesystem::path& p);
+
+        /** Path shown before (or instead of) loaded audio — lets the owner
+            retry analysis on a failed card, which never received a file. */
+        [[nodiscard]] const std::filesystem::path& displayPath() const noexcept
+        {
+            return displayPath_;
+        }
 
         /** Kick off the "cooling glow" entry animation (call after setFile). */
         void triggerEntryGlow() noexcept;
@@ -108,6 +120,7 @@ namespace switchblade::ui
         void mouseUp          (const juce::MouseEvent&) override;
         void mouseEnter       (const juce::MouseEvent&) override;
         void mouseExit        (const juce::MouseEvent&) override;
+        void mouseMove        (const juce::MouseEvent&) override;
         void mouseDoubleClick (const juce::MouseEvent&) override;
         void mouseWheelMove   (const juce::MouseEvent&,
                                const juce::MouseWheelDetails&) override;
@@ -141,16 +154,23 @@ namespace switchblade::ui
         std::optional<float>                         pitchClarity_;
 
         bool  selected_      { false };
-        bool  multiSelected_ { false };  // Ctrl+click export selection
+        bool  multiSelected_ { false };  // Cmd/Ctrl+click export selection
         bool  hovered_       { false };
         bool  loading_     { false };  // "ANALYZING…" overlay
+        bool  failed_      { false };  // crimson FAILED state
+        juce::String failReason_;      // shown inside the failed card body
         float liftPhase_   { 0.0f };   // 0 = resting, 1 = fully lifted
         float entryGlow_   { 0.0f };   // 1 = white-hot arrival, decays to 0
         int   draggingIdx_ { -1 };
         bool  dragOutFired_ { false };   // latches per gesture so onDragOut fires once
+        bool  dragOutArmed_ { false };   // press began on the header grip area
+        bool  badgeHovered_ { false };   // repaint header only on transitions
         std::filesystem::path displayPath_;  // shown before file_ is set
         // Badge hit area — set in paintHeader (const, so mutable), read in mouseDown.
         mutable juce::Rectangle<int> badgeBounds_;
+        // Zoom badge hit area — set in paintWaveform while zoomed; clicking it
+        // resets the view to the full file.
+        mutable juce::Rectangle<int> zoomBadgeBounds_;
 
         // Waveform zoom / pan state.
         // viewStart_ and viewEnd_ are normalised fractions of the total file [0, 1].

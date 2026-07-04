@@ -192,7 +192,15 @@ namespace switchblade::ui
         constexpr int kBrandWidth   = 235;   // left brand area: logo (50) + 15 gap + wordmark (~170)
         constexpr int kHeaderPadX   = 20;    // outer L/R padding so content doesn't choke window edge
         constexpr int kGridFrac     = 30;
-        constexpr int kPreviewGridH = 300;   // fixed height for the 4x4 pad grid
+        constexpr int kPreviewGridH = 300;   // preferred height for the 4x4 pad grid
+
+        // The multi-select modifier is Cmd on macOS (Ctrl+click is the popup
+        // gesture there) and Ctrl everywhere else — keep hint text honest.
+       #if JUCE_MAC
+        constexpr const char* kMultiSelectKeyName = "Cmd";
+       #else
+        constexpr const char* kMultiSelectKeyName = "Ctrl";
+       #endif
 
         constexpr std::array<const char*, 5> kModeNames {
             "Auto", "Percussive", "Melodic", "Texture", "Grid"
@@ -526,7 +534,6 @@ namespace switchblade::ui
         };
 
         // Buttons
-        extractAllBtn_.onClick      = [this] { extractAll(); };
         produceBtn_.onClick         = [this] { produceAllSlices(); };
         exportSelectionBtn_.onClick = [this] { exportSelection(); };
 
@@ -549,7 +556,15 @@ namespace switchblade::ui
         produceBtn_.onRightClick         = showNormMenu;
         exportSelectionBtn_.onRightClick = showNormMenu;
 
-        addAndMakeVisible (extractAllBtn_);
+        // Surface the hidden right-click menu — a tooltip is the minimum
+        // discoverable cue for an option that changes what lands on disk.
+        produceBtn_.setTooltip ("Export every slice (or the vault selection when "
+                                "one exists).\nRight-click: normalization level.");
+        exportSelectionBtn_.setTooltip (
+            juce::String (kMultiSelectKeyName)
+            + "+click vault tiles to select, then export just those.\n"
+              "Right-click: normalization level.");
+
         addAndMakeVisible (produceBtn_);
         addAndMakeVisible (exportSelectionBtn_);
 
@@ -622,6 +637,14 @@ namespace switchblade::ui
             queueTilePreRender (t);
         };
 
+        // "Trash Compactor" — clear every tile in the vault (source cards stay).
+        resultsVault_->onClearRequested = [this]
+        {
+            resultsVault_->clear();
+            updateSelectionCount();
+            setStatus ("Vault cleared.");
+        };
+
         resultsVault_->onTileExternalDrag = [this] (ResultTile& tile)
         {
             // Bundled drag if the initiating tile is part of a Neon-Gold
@@ -677,10 +700,16 @@ namespace switchblade::ui
             // No post-drop delete: pre-rendered files persist for re-drag
             // within the same session. Startup janitor sweeps stale files on
             // next launch, so disk usage stays bounded across sessions.
+            //
+            // The drag call blocks on Windows but returns immediately on
+            // macOS/Linux, so the guard flag must be cleared from the
+            // completion callback — not on the next line — or a drop landing
+            // back over this window would be re-ingested as a source card.
             performingDragOut_ = true;
-            juce::DragAndDropContainer::performExternalDragDropOfFiles (
-                paths, false, &tile);
-            performingDragOut_ = false;
+            const bool started = juce::DragAndDropContainer::performExternalDragDropOfFiles (
+                paths, false, &tile, [this] { performingDragOut_ = false; });
+            if (! started)
+                performingDragOut_ = false;
         };
 
         // Engine callbacks
@@ -705,6 +734,11 @@ namespace switchblade::ui
 
     MainContainer::~MainContainer()
     {
+        // Stop any in-flight background export before children die: the job
+        // checks this flag between slices and bails out promptly.
+        exportCancel_->store (true);
+        exportPool_.removeAllJobs (true, 4000);
+
         resultsVault_->clear();      // drain timer before children are destroyed
         removeKeyListener (previewGrid_.get());
         audioPlayer_.setSource (nullptr);
@@ -740,25 +774,13 @@ namespace switchblade::ui
             return r.withSizeKeepingCentre (r.getWidth(), 32);
         };
 
-        // ── Right pod (Actions) — anchored to right edge ─────────────────────
-        // Uniform 120×32 buttons except Export Selection which needs ~150 to fit
-        // its longer label (and any " • -3dB" normalisation suffix).
+        // Preferred control widths. When the bar can't fit them all (small
+        // windows, or Grid mode's extra fields) every pod width scales down
+        // uniformly instead of the rightmost controls collapsing to zero.
         constexpr int kBtnW          = 120;
         constexpr int kBtnExportW    = 150;
         constexpr int kBtnGap        = 10;
         constexpr int kCounterW      = 96;
-
-        selectionCountLabel_.setBounds (bar.removeFromRight (kCounterW));
-        bar.removeFromRight (kBtnGap);
-        exportSelectionBtn_.setBounds  (b32 (bar.removeFromRight (kBtnExportW)));
-        bar.removeFromRight (kBtnGap);
-        produceBtn_.setBounds          (b32 (bar.removeFromRight (kBtnW)));
-        bar.removeFromRight (kBtnGap);
-        extractAllBtn_.setBounds       (b32 (bar.removeFromRight (kBtnW)));
-        bar.removeFromRight (kBtnGap);
-        outputDirBtn_.setBounds        (b32 (bar.removeFromRight (kBtnW)));
-
-        // ── Centre pod (Controls) — horizontally centred in remaining bar ─────
         constexpr int kComboW   = 110;
         constexpr int kCenterG  = 15;
         constexpr int kSensW    = 68;   // wide enough for "1/32T" / "1/16T" in Grid mode
@@ -766,39 +788,62 @@ namespace switchblade::ui
         constexpr int kSliderW  = 150;
         constexpr int kBpmW     = 70;   // "AUTO" / "118 BPM"
         constexpr int kMaxW     = 56;   // "ALL" / "4"
-        // The BPM + Max fields only occupy the bar in Grid mode; reserve their
-        // width (plus gaps) only then so the centre pod stays centred in every
-        // mode.
-        const int kBpmSlot  = sliderInGridMode_
+
+        const int kBpmSlot = sliderInGridMode_
             ? (kSensGap + kBpmW + kSensGap + kMaxW) : 0;
         const int kCenterTotal =
             kComboW + kCenterG + kSensW + kSensGap + kSliderW + kBpmSlot;
+        const int kRightTotal =
+            kCounterW + kBtnGap + kBtnExportW + kBtnGap + kBtnW + kBtnGap + kBtnW;
 
-        const int leftPad = juce::jmax (15, (bar.getWidth() - kCenterTotal) / 2);
+        const float squeeze = juce::jlimit (0.55f, 1.0f,
+            static_cast<float> (bar.getWidth())
+            / static_cast<float> (kRightTotal + kCenterTotal + 2 * kBtnGap));
+        const auto sq = [squeeze] (int w)
+        {
+            return juce::roundToInt (static_cast<float> (w) * squeeze);
+        };
+
+        // ── Right pod (Actions) — anchored to right edge ─────────────────────
+        selectionCountLabel_.setBounds (bar.removeFromRight (sq (kCounterW)));
+        bar.removeFromRight (sq (kBtnGap));
+        exportSelectionBtn_.setBounds  (b32 (bar.removeFromRight (sq (kBtnExportW))));
+        bar.removeFromRight (sq (kBtnGap));
+        produceBtn_.setBounds          (b32 (bar.removeFromRight (sq (kBtnW))));
+        bar.removeFromRight (sq (kBtnGap));
+        outputDirBtn_.setBounds        (b32 (bar.removeFromRight (sq (kBtnW))));
+
+        // ── Centre pod (Controls) — horizontally centred in remaining bar ─────
+        const int centerTotalSq = sq (kCenterTotal);
+        const int leftPad = juce::jmax (10, (bar.getWidth() - centerTotalSq) / 2);
         bar.removeFromLeft (leftPad);
 
-        modeCombo_.setBounds        (b32 (bar.removeFromLeft (kComboW)));
-        bar.removeFromLeft (kCenterG);
-        sensitivityLabel_.setBounds (bar.removeFromLeft (kSensW));
+        modeCombo_.setBounds        (b32 (bar.removeFromLeft (sq (kComboW))));
+        bar.removeFromLeft (sq (kCenterG));
+        sensitivityLabel_.setBounds (bar.removeFromLeft (sq (kSensW)));
         bar.removeFromLeft (kSensGap);
-        sensitivitySlider_.setBounds(b32 (bar.removeFromLeft (kSliderW)));
+        sensitivitySlider_.setBounds(b32 (bar.removeFromLeft (sq (kSliderW))));
         if (sliderInGridMode_)
         {
             bar.removeFromLeft (kSensGap);
-            bpmField_.setBounds (b32 (bar.removeFromLeft (kBpmW)));
+            bpmField_.setBounds (b32 (bar.removeFromLeft (sq (kBpmW))));
             bar.removeFromLeft (kSensGap);
-            maxSamplesField_.setBounds (b32 (bar.removeFromLeft (kMaxW)));
+            maxSamplesField_.setBounds (b32 (bar.removeFromLeft (sq (kMaxW))));
         }
 
         // Status fills whatever remains between centre group and right pod —
         // empty by default, populated by setStatus() during analysis.
         statusLabel_.setBounds (bar);
 
-        // Body split — right panel: PreviewGrid (top fixed) + ResultsVault (rest)
+        // Body split — right panel: PreviewGrid (top) + ResultsVault (rest).
+        // The grid gives ground on short windows so the vault always keeps at
+        // least ~55% of the panel instead of being squeezed to a sliver.
         const int gridW = area.getWidth() * kGridFrac / 100;
         auto rightPanel = area.removeFromRight (gridW);
 
-        previewGrid_->setBounds (rightPanel.removeFromTop (kPreviewGridH).reduced (8));
+        const int padGridH = juce::jmin (kPreviewGridH,
+                                         rightPanel.getHeight() * 45 / 100);
+        previewGrid_->setBounds (rightPanel.removeFromTop (padGridH).reduced (8));
 
         resultsViewport_.setBounds (rightPanel.reduced (4, 0));
         resultsVault_->setViewportWidth (
@@ -1053,8 +1098,9 @@ namespace switchblade::ui
         if (queued > 0)
         {
             analyzing_ = true;
+            updateActionButtonStates();
             const int totalPending = static_cast<int> (pendingCards_.size());
-            extractAllBtn_.setButtonText (
+            produceBtn_.setButtonText (
                 juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
                 + juce::String (totalPending) + ")");
             setStatus (juce::String (queued)
@@ -1091,39 +1137,36 @@ namespace switchblade::ui
 
         if (! result.ok())
         {
+            ++batchFailures_;
             setStatus ("Error: " + result.errorMessage);
-            if (card) card->setLoading (false);
+            if (card)
+                card->setFailed (result.errorMessage);
             // Still update the button count — this job is now done
             if (analyzing_ && ! pendingCards_.empty())
-                extractAllBtn_.setButtonText (
+                produceBtn_.setButtonText (
                     juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
                     + juce::String (pendingCards_.size()) + ")");
             return;
         }
 
         // Update live count on button
-        if (analyzing_)
-        {
-            if (pendingCards_.empty())
-                extractAllBtn_.setButtonText ("Extract All");   // last one cleared
-            else
-                extractAllBtn_.setButtonText (
-                    juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
-                    + juce::String (pendingCards_.size()) + ")");
-        }
+        if (analyzing_ && ! pendingCards_.empty())
+            produceBtn_.setButtonText (
+                juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
+                + juce::String (pendingCards_.size()) + ")");
 
-        // Load audio into a shared_ptr for card + preview grid
-        auto file = switchblade::analysis::loadAudioFile (formatManager_, result.path);
-        if (! file.has_value())
+        // The job hands back the audio it analysed — no message-thread disk
+        // re-read (which used to visibly stall the UI on long files).
+        auto sharedFile = result.audio;
+        if (! sharedFile)
         {
-            setStatus ("Re-read failed for: "
+            ++batchFailures_;
+            setStatus ("Load failed for: "
                        + juce::String (result.path.filename().string()));
-            if (card) card->setLoading (false);
+            if (card)
+                card->setFailed ("Could not load audio");
             return;
         }
-
-        auto sharedFile = std::make_shared<const switchblade::analysis::AudioFile> (
-            std::move (*file));
 
         // If no pending card existed (e.g. engine was used directly), create one now
         if (card == nullptr)
@@ -1297,7 +1340,13 @@ namespace switchblade::ui
     void MainContainer::reAnalyzeCard (SampleCard* card,
                                         switchblade::analysis::AnalysisMode mode)
     {
-        if (card == nullptr || ! card->file()) return;
+        if (card == nullptr) return;
+
+        // Failed cards never received a file — fall back to the display path
+        // so the badge dropdown doubles as their retry control.
+        const auto path = card->file() ? card->file()->path
+                                       : card->displayPath();
+        if (path.empty()) return;
 
         // Remove any stale pending-job entry pointing at this card.
         for (auto it = pendingCards_.begin(); it != pendingCards_.end(); )
@@ -1307,12 +1356,12 @@ namespace switchblade::ui
         }
 
         card->setLoading (true);
-        const auto path = card->file()->path;
         const int jobId = engine_.enqueue (path, mode);
         pendingCards_.emplace (jobId, card);
 
         analyzing_ = true;
-        extractAllBtn_.setButtonText (
+        updateActionButtonStates();
+        produceBtn_.setButtonText (
             juce::String (juce::CharPointer_UTF8 ("ANALYZING\xe2\x80\xa6 ("))
             + juce::String (pendingCards_.size()) + ")");
         setStatus (juce::String (path.filename().string())
@@ -1325,7 +1374,8 @@ namespace switchblade::ui
     void MainContainer::onAllAnalysisComplete()
     {
         analyzing_ = false;
-        extractAllBtn_.setButtonText ("Extract All");
+        updateNormLabel();              // restores "Produce" (+ any norm suffix)
+        updateActionButtonStates();
 
         // Rebuild vault in cards_ (drop) order so tile indices always match
         // grid pad indices: tile 001 = pad 1 (key "1"), tile 016 = pad V (key "V").
@@ -1359,11 +1409,21 @@ namespace switchblade::ui
         const int totalSlices = resultsVault_ ? resultsVault_->tileCount()
                                               + resultsVault_->pendingCount() : 0;
 
+        // Failures would otherwise be invisible: each error status line is
+        // overwritten by the next completion, so the batch summary is the one
+        // place a "3 failed" can reliably reach the user.
+        const juce::String failNote = batchFailures_ > 0
+            ? (juce::String (juce::CharPointer_UTF8 ("  \xe2\x80\x94  "))
+               + juce::String (batchFailures_) + " FAILED")
+            : juce::String{};
+        batchFailures_ = 0;
+
         setStatus (juce::String (totalCards)  + " file"
                    + (totalCards  != 1 ? "s" : "")
                    + juce::String (juce::CharPointer_UTF8 ("  \xe2\x80\x94  "))
                    + juce::String (totalSlices) + " slice"
-                   + (totalSlices != 1 ? "s" : "") + " extracted");
+                   + (totalSlices != 1 ? "s" : "") + " extracted"
+                   + failNote);
     }
 
     //==========================================================================
@@ -1402,11 +1462,14 @@ namespace switchblade::ui
         paths.add (f.getFullPathName());
 
         // canMoveFiles = false: never let a DAW take ownership of the user's
-        // original source. The OS does a copy-on-import for safety.
+        // original source. The OS does a copy-on-import for safety. The guard
+        // flag is cleared via the completion callback because the call is
+        // asynchronous on macOS/Linux (see onTileExternalDrag).
         performingDragOut_ = true;
-        juce::DragAndDropContainer::performExternalDragDropOfFiles (
-            paths, false, card);
-        performingDragOut_ = false;
+        const bool started = juce::DragAndDropContainer::performExternalDragDropOfFiles (
+            paths, false, card, [this] { performingDragOut_ = false; });
+        if (! started)
+            performingDragOut_ = false;
     }
 
     //==========================================================================
@@ -1534,12 +1597,27 @@ namespace switchblade::ui
         menu.addItem (1, n == 1 ? juce::String ("Delete card")
                                 : "Delete " + juce::String (n) + " selected cards");
 
+        // Escape hatch for the "Don't ask me again" checkbox — without this
+        // the remembered delete behaviour is a permanent, invisible trap.
+        const bool hasRememberedChoice =
+            userSettings().getValue ("deleteCardsAction", "prompt") != "prompt";
+        if (hasRememberedChoice)
+            menu.addItem (2, "Ask again before deleting cards with slices");
+
         menu.showMenuAsync (
             juce::PopupMenu::Options{}.withTargetComponent (clickedCard),
             [this, targets = std::move (targets)] (int result) mutable
             {
                 if (result == 1)
+                {
                     requestDeleteCards (std::move (targets));
+                }
+                else if (result == 2)
+                {
+                    userSettings().setValue ("deleteCardsAction", "prompt");
+                    userSettings().saveIfNeeded();
+                    setStatus ("Delete confirmation re-enabled.");
+                }
             });
     }
 
@@ -1660,79 +1738,47 @@ namespace switchblade::ui
     }
 
     //==========================================================================
-    //  Batch rendering helpers
+    //  Batch rendering — spec collection happens here on the message thread;
+    //  pitch detection + WAV writes run on exportPool_ (see
+    //  startBackgroundExport) so a big batch never freezes the UI.
     //==========================================================================
-    void MainContainer::renderAndExportCard (SampleCard& card)
+    namespace
     {
-        if (! card.file()) return;
-        const auto& tf  = *card.file();
-        const auto& ts  = card.transients();
-        if (ts.empty()) return;
-
-        const juce::int64 len   = tf.samples.getNumSamples();
-        const auto stem         = juce::File (juce::String (tf.path.string()))
-                                      .getFileNameWithoutExtension();
-        const auto outDir       = juce::File (juce::String (tf.path.parent_path().string()));
-        const auto tag          = classificationTag (card.classification());
-
-        // Each slice gets its OWN pitch estimate — critical for multi-note
-        // recordings (cello phrases, vocal lines, etc.) where the file-wide
-        // pitch is meaningless. Falls back to the file-wide pitch only if
-        // the slice itself is too short / silent for reliable detection.
-        const bool isMelodic = wantsPitch (card.classification());
-        const std::optional<float> filePitchHz = isMelodic ? card.pitchHz() : std::optional<float>{};
-
-        for (std::size_t i = 0; i < ts.size(); ++i)
+        // Slice boundary rule shared by every export path: energy-decay
+        // natural end when set, else next onset, else file end.
+        [[nodiscard]] juce::int64 sliceEndFor (
+            const std::vector<switchblade::analysis::Transient>& ts,
+            std::size_t i, juce::int64 len) noexcept
         {
-            const juce::int64 start = ts[i].sampleIndex;
-            // Use energy-decay natural end to preserve the full ADSR tail.
-            // Falls back to next onset only when naturalEnd is not set.
             const juce::int64 end = (ts[i].naturalEnd > 0)
                 ? ts[i].naturalEnd
                 : ((i + 1 < ts.size()) ? ts[i + 1].sampleIndex : len);
-            const juce::int64 endC = std::min (end, len);
-
-            std::optional<float> slicePitchHz;
-            juce::String keySuffix;
-            if (isMelodic)
-            {
-                slicePitchHz = detectSlicePitchHz (tf, start, endC);
-                if (! slicePitchHz.has_value()) slicePitchHz = filePitchHz;
-                if (slicePitchHz.has_value())
-                    keySuffix = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
-                        *slicePitchHz));
-            }
-
-            const auto fname = makeSliceFilename (stem, tag, keySuffix,
-                                                  static_cast<int> (i + 1));
-            renderSliceToWav (tf, start, endC,
-                              outDir.getChildFile (fname), slicePitchHz);
+            return std::min (end, len);
         }
-        setStatus ("Extracted " + juce::String (ts.size()) + " slices from " + stem);
-    }
+    } // namespace
 
-    void MainContainer::extractAll()
+    void MainContainer::renderAndExportCard (SampleCard& card)
     {
-        if (cards_.empty()) { setStatus ("No files loaded."); return; }
+        if (! card.file() || card.transients().empty()) return;
 
-        // Match the tile-only selection behaviour in produceAllSlices().
-        const bool anySelected =
-            resultsVault_ && resultsVault_->selectedTileCount() > 0;
+        const auto& tf = *card.file();
+        const auto& ts = card.transients();
+        const juce::int64 len = tf.samples.getNumSamples();
+        const auto stem   = juce::File (juce::String (tf.path.string()))
+                                .getFileNameWithoutExtension();
+        const auto outDir = juce::File (juce::String (tf.path.parent_path().string()));
+        const bool pitched = wantsPitch (card.classification());
 
-        int total = 0;
-        if (anySelected)
-        {
-            total = resultsVault_->selectedTileCount();
-        }
-        else
-        {
-            for (const auto& c : cards_)
-                total += static_cast<int> (c->transients().size());
-        }
+        std::vector<ExportSpec> specs;
+        specs.reserve (ts.size());
+        for (std::size_t i = 0; i < ts.size(); ++i)
+            specs.push_back ({ card.file(),
+                               ts[i].sampleIndex, sliceEndFor (ts, i, len),
+                               card.classification(), stem, {},
+                               pitched ? card.pitchHz() : std::optional<float>{},
+                               static_cast<int> (i + 1), outDir });
 
-        setStatus ("Extracting " + juce::String (total)
-                   + juce::String (juce::CharPointer_UTF8 (" slices\xe2\x80\xa6")));
-        produceAllSlices();
+        startBackgroundExport (std::move (specs));
     }
 
     void MainContainer::produceAllSlices()
@@ -1740,113 +1786,167 @@ namespace switchblade::ui
         if (cards_.empty()) { setStatus ("No files loaded."); return; }
 
         // Selection-aware: if the user has Neon-Gold-selected any vault tiles,
-        // Produce / Extract-All act on that selection only. Sidebar card
-        // multi-select doesn't count (per the spec — only vault tiles are
-        // eligible for Export Selection).
+        // Produce acts on that selection only. Sidebar card multi-select
+        // doesn't count (per the spec — only vault tiles are eligible for
+        // Export Selection).
         const bool anySelected =
             resultsVault_ && resultsVault_->selectedTileCount() > 0;
         if (anySelected) { exportSelection(); return; }
 
-        int exported = 0;
+        std::vector<ExportSpec> specs;
         for (const auto& card : cards_)
         {
             if (! card->file() || card->transients().empty()) continue;
-            const auto& tf  = *card->file();
-            const auto& ts  = card->transients();
+            const auto& tf = *card->file();
+            const auto& ts = card->transients();
             const juce::int64 len = tf.samples.getNumSamples();
             const auto stem  = juce::File (juce::String (tf.path.string()))
                                    .getFileNameWithoutExtension();
             const auto outDir = outputDir_.isDirectory()
                 ? outputDir_
                 : juce::File (juce::String (tf.path.parent_path().string()));
-            const auto tag    = classificationTag (card->classification());
-
-            const bool isMelodic = wantsPitch (card->classification());
-            const std::optional<float> filePitchHz = isMelodic ? card->pitchHz() : std::optional<float>{};
+            const bool pitched = wantsPitch (card->classification());
 
             for (std::size_t i = 0; i < ts.size(); ++i)
-            {
-                const juce::int64 start = ts[i].sampleIndex;
-                const juce::int64 end   = (ts[i].naturalEnd > 0)
-                    ? ts[i].naturalEnd
-                    : ((i + 1 < ts.size()) ? ts[i + 1].sampleIndex : len);
-                const juce::int64 endC  = std::min (end, len);
-
-                std::optional<float> slicePitchHz;
-                juce::String ks;
-                if (isMelodic)
-                {
-                    slicePitchHz = detectSlicePitchHz (tf, start, endC);
-                    if (! slicePitchHz.has_value()) slicePitchHz = filePitchHz;
-                    if (slicePitchHz.has_value())
-                        ks = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
-                                           *slicePitchHz));
-                }
-
-                const auto fname = makeSliceFilename (stem, tag, ks, static_cast<int> (i + 1));
-                renderSliceToWav (tf, start, endC,
-                                  outDir.getChildFile (fname), slicePitchHz);
-                ++exported;
-            }
+                specs.push_back ({ card->file(),
+                                   ts[i].sampleIndex, sliceEndFor (ts, i, len),
+                                   card->classification(), stem, {},
+                                   pitched ? card->pitchHz() : std::optional<float>{},
+                                   static_cast<int> (i + 1), outDir });
         }
-        setStatus (juce::String (exported) + " slices exported.");
+        startBackgroundExport (std::move (specs));
     }
 
     void MainContainer::exportSelection()
     {
-        int exported = 0;
-
         // Per spec: only Neon-Gold vault tiles are eligible for Export
         // Selection. Sidebar SampleCard multi-select is a visual cue only
         // and does NOT contribute to the export — preventing accidental
         // bulk exports of an entire file when the user really meant to
         // grab a few specific slices from the result vault.
+        std::vector<ExportSpec> specs;
         if (resultsVault_)
         {
             resultsVault_->forEachSelectedTile (
-                [this, &exported] (const ResultTile& tile)
+                [this, &specs] (const ResultTile& tile)
                 {
                     const auto file = tile.file();
                     if (! file) return;
 
-                    const auto& tf  = *file;
-                    const juce::int64 len   = tf.samples.getNumSamples();
-                    const juce::int64 start = tile.startSample();
-                    const juce::int64 end   = std::min (tile.endSample(), len);
-
-                    const auto stem = juce::File (juce::String (tf.path.string()))
+                    const juce::int64 len = file->samples.getNumSamples();
+                    const auto stem = juce::File (juce::String (file->path.string()))
                                           .getFileNameWithoutExtension();
                     const auto outDir = outputDir_.isDirectory()
                         ? outputDir_
-                        : juce::File (juce::String (tf.path.parent_path().string()));
-                    const auto tag    = classificationTag (tile.classification());
+                        : juce::File (juce::String (
+                              file->path.parent_path().string()));
 
-                    // Per-slice pitch detection — never trust the file-wide
-                    // tile.noteName() for melodic content; that note was the
-                    // first-frame pitch of the whole file and is wrong for
-                    // multi-note recordings.
-                    juce::String ks;
-                    std::optional<float> pitchHz;
-                    if (wantsPitch (tile.classification()))
-                    {
-                        pitchHz = detectSlicePitchHz (tf, start, end);
-                        if (pitchHz.has_value())
-                            ks = juce::String (switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
-                                              *pitchHz));
-                        else
-                            ks = tile.noteName();   // fallback (file-wide note, no cents)
-                    }
-                    const auto fname = makeSliceFilename (stem, tag, ks, tile.sliceIndex());
-                    renderSliceToWav (tf, start, end,
-                                      outDir.getChildFile (fname), pitchHz);
-                    ++exported;
+                    specs.push_back ({ file,
+                                       tile.startSample(),
+                                       std::min (tile.endSample(), len),
+                                       tile.classification(), stem,
+                                       tile.noteName(), {},
+                                       tile.sliceIndex(), outDir });
                 });
         }
 
-        if (exported == 0)
-            setStatus ("Nothing selected. Ctrl+click loaded files or vault tiles.");
-        else
-            setStatus (juce::String (exported) + " slice(s) exported from selection.");
+        if (specs.empty())
+        {
+            setStatus (juce::String ("Nothing selected. ") + kMultiSelectKeyName
+                       + "+click vault tiles to select slices.");
+            return;
+        }
+        startBackgroundExport (std::move (specs));
+    }
+
+    void MainContainer::startBackgroundExport (std::vector<ExportSpec> specs)
+    {
+        if (exporting_)
+        {
+            setStatus (juce::String (juce::CharPointer_UTF8 (
+                "An export is already running\xe2\x80\xa6")));
+            return;
+        }
+        if (specs.empty())
+        {
+            setStatus ("Nothing to export.");
+            return;
+        }
+
+        exporting_ = true;
+        updateActionButtonStates();
+        exportCancel_->store (false);
+
+        const auto total  = static_cast<int> (specs.size());
+        const float normDb = normTargetDb_;
+        auto cancel = exportCancel_;
+        juce::Component::SafePointer<MainContainer> weak = this;
+
+        setStatus (juce::String (juce::CharPointer_UTF8 ("Exporting\xe2\x80\xa6 0/"))
+                   + juce::String (total));
+
+        exportPool_.addJob ([specs = std::move (specs), total, normDb,
+                             cancel, weak] () mutable
+        {
+            int done = 0;
+            for (const auto& s : specs)
+            {
+                if (cancel->load()) return;
+                if (! s.file || s.end <= s.start) { ++done; continue; }
+
+                // Per-slice pitch (YIN) runs HERE, off the message thread —
+                // it's the dominant cost for melodic/grid batches.
+                std::optional<float> pitchHz;
+                juce::String keySuffix;
+                if (switchblade::analysis::wantsPitch (s.classification))
+                {
+                    pitchHz = detectSlicePitchHz (*s.file, s.start, s.end);
+                    if (! pitchHz.has_value()) pitchHz = s.fallbackPitchHz;
+                    if (pitchHz.has_value())
+                        keySuffix = juce::String (
+                            switchblade::analysis::PitchDetector::noteNameWithCentsFromHz (
+                                *pitchHz));
+                    else
+                        keySuffix = s.fallbackNote;
+                }
+
+                const auto fname = makeSliceFilename (
+                    s.stem, classificationTag (s.classification), keySuffix, s.index);
+                renderSliceToWavImpl (*s.file, s.start, s.end,
+                                      s.outDir.getChildFile (fname), pitchHz, normDb);
+                ++done;
+
+                juce::MessageManager::callAsync ([weak, done, total]
+                {
+                    if (auto* mc = weak.getComponent())
+                        mc->setStatus (juce::String (juce::CharPointer_UTF8 (
+                                           "Exporting\xe2\x80\xa6 "))
+                                       + juce::String (done) + "/"
+                                       + juce::String (total));
+                });
+            }
+
+            juce::MessageManager::callAsync ([weak, total]
+            {
+                if (auto* mc = weak.getComponent())
+                {
+                    mc->exporting_ = false;
+                    mc->updateActionButtonStates();
+                    mc->setStatus (juce::String (total) + " slice"
+                                   + (total != 1 ? "s" : "") + " exported.");
+                }
+            });
+        });
+    }
+
+    void MainContainer::updateActionButtonStates()
+    {
+        // Exports read card transients and write files derived from them, so
+        // both primary actions stay off while analysis is rewriting the model
+        // or an export batch is already in flight.
+        const bool busy = analyzing_ || exporting_;
+        produceBtn_.setEnabled (! busy);
+        exportSelectionBtn_.setEnabled (! busy);
     }
 
     void MainContainer::renderSliceToWav (

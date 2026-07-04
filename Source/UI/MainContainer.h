@@ -35,15 +35,16 @@ namespace switchblade::ui
     };
 
     //==========================================================================
-    //  EllipsisLabel — single-line label that truncates with "…" when narrower
-    //  than its full text. Hovering reveals the full string via tooltip. Used
-    //  for the top-bar status so it never overruns the SWITCHBLADE wordmark.
+    //  ClippingLabel — single-line label that CLIPS (no "…", no squashing)
+    //  when narrower than its full text; hovering reveals the full string via
+    //  tooltip. Used for the top-bar status so a tight layout never distorts
+    //  the text.
     //==========================================================================
-    class EllipsisLabel final : public juce::Component,
+    class ClippingLabel final : public juce::Component,
                                 public juce::SettableTooltipClient
     {
     public:
-        EllipsisLabel() = default;
+        ClippingLabel() = default;
 
         void setText (const juce::String& s)
         {
@@ -76,7 +77,7 @@ namespace switchblade::ui
         juce::Font          font_   { juce::FontOptions { 13.0f } };
         juce::Justification just_   { juce::Justification::centredLeft };
 
-        JUCE_LEAK_DETECTOR (EllipsisLabel)
+        JUCE_LEAK_DETECTOR (ClippingLabel)
     };
 
     //==========================================================================
@@ -200,7 +201,9 @@ namespace switchblade::ui
         // Grid-only "Max samples" field. Click-to-edit; "ALL" keeps every grid
         // cell, a number curates to that many strong/distinct one-shots.
         juce::Label        maxSamplesField_;
-        juce::TextButton   extractAllBtn_      { "Extract All" };
+        // Single primary action (the "Igniter"): exports every slice, or the
+        // vault selection when one exists. Doubles as the ANALYZING… (N)
+        // progress indicator while jobs are in flight.
         RightClickButton   produceBtn_         { "Produce" };
         RightClickButton   exportSelectionBtn_ { "Export Selection" };
         RightClickButton   outputDirBtn_       { "Source folder" };
@@ -208,7 +211,7 @@ namespace switchblade::ui
         std::unique_ptr<juce::FileChooser> fileChooser_;  // kept alive across async callback
         float              normTargetDb_       { 0.0f };  // 0 = off, negative = target dBFS
         juce::Label        selectionCountLabel_;   // "N selected" — live count
-        EllipsisLabel      statusLabel_;
+        ClippingLabel      statusLabel_;
         juce::TooltipWindow tooltipWindow_ { this, 600 };
 
         //----- Card list ------------------------------------------------------
@@ -233,6 +236,7 @@ namespace switchblade::ui
         //----- Runtime state -------------------------------------------------
         bool dropHighlight_ { false };
         bool analyzing_     { false };  // true while any jobs are in-flight
+        int  batchFailures_ { 0 };      // failed jobs since the last all-complete
         // True for the duration of an external drag-out (performExternalDrag-
         // DropOfFiles is blocking on Windows). Guards filesDropped from
         // re-ingesting our own drag as a new source card when the OS drop ends
@@ -249,8 +253,37 @@ namespace switchblade::ui
         void chooseOutputDir();                  // opens async folder picker
         void updateOutputDirLabel() noexcept;    // syncs button text/tooltip to outputDir_
         void renderAndExportCard (SampleCard& card);
-        void extractAll();
         void produceAllSlices();
+
+        //----- Background export ----------------------------------------------
+        // Everything needed to render one slice to disk, snapshotted on the
+        // message thread. Per-slice pitch detection and the WAV write both run
+        // on exportPool_ so a big batch never freezes the UI.
+        struct ExportSpec
+        {
+            std::shared_ptr<const switchblade::analysis::AudioFile> file;
+            juce::int64                          start { 0 };
+            juce::int64                          end   { 0 };
+            switchblade::analysis::SourceClass   classification
+                { switchblade::analysis::SourceClass::Unknown };
+            juce::String                         stem;          // filename stem
+            juce::String                         fallbackNote;  // file-wide note
+            std::optional<float>                 fallbackPitchHz;
+            int                                  index { 1 };
+            juce::File                           outDir;
+        };
+        /** Queue the specs on exportPool_; progress + completion land in the
+            status label via callAsync. No-op when a previous export is still
+            running (buttons are disabled then anyway). */
+        void startBackgroundExport (std::vector<ExportSpec> specs);
+        /** Enable/disable Produce + Export Selection based on analyzing_ /
+            exporting_ so a half-updated model can't be exported. */
+        void updateActionButtonStates();
+
+        juce::ThreadPool                   exportPool_ { 1 };
+        std::shared_ptr<std::atomic<bool>> exportCancel_
+            { std::make_shared<std::atomic<bool>> (false) };
+        bool                               exporting_ { false };
 
         //----- Drag a card's source file out to the OS / DAW ------------------
         void dragOutCard (SampleCard* card);

@@ -66,7 +66,10 @@ private:
         {
             setUsingNativeTitleBar (true);
             setResizable (true, false);
-            setResizeLimits (800, 500, 3840, 2160);
+            // 1000px is the narrowest the top bar survives with its controls
+            // squeezed to their 55% floor (Grid mode adds BPM + Max fields);
+            // 560px keeps the preview grid + vault both usable.
+            setResizeLimits (1000, 560, 3840, 2160);
 
             container_ = std::make_unique<switchblade::ui::MainContainer>();
             container_->initAudioDevice();

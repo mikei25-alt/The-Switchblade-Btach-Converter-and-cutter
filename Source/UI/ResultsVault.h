@@ -102,10 +102,13 @@ namespace switchblade::ui
             a subsequent drag-out is instant. */
         std::function<void (ResultTile&)> onTileLanded;
 
+        /** Fired when the user confirms the badge-bar CLEAR control (the
+            "Trash Compactor") — the owner decides what clearing means. */
+        std::function<void()> onClearRequested;
+
         //----- Component -------------------------------------------------------
         void paint     (juce::Graphics&) override;
         void resized   () override;
-        void mouseDown (const juce::MouseEvent&) override;
 
     private:
         static constexpr int kCols        = 4;
@@ -133,6 +136,11 @@ namespace switchblade::ui
 
         juce::AudioFormatManager&               fmt_;
         juce::AudioThumbnailCache&              cache_;
+
+        // Real buttons (hover/pressed feedback, keyboard focus, accessibility)
+        // instead of painted pills with hand-rolled hit-testing.
+        juce::TextButton                        exportBtn_ { "EXPORT COLLECTION" };
+        juce::TextButton                        clearBtn_  { "CLEAR" };
 
         std::deque<PendingSlice>                pending_;
         std::vector<std::unique_ptr<ResultTile>> tiles_;

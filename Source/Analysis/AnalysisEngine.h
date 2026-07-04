@@ -84,6 +84,11 @@ namespace switchblade::analysis
         std::optional<double>   detectedBpm;        // set by Grid mode (auto-detected or manual)
         juce::String            errorMessage;       // empty on success
 
+        // The audio that was analysed, shared with the UI so the message
+        // thread never re-reads the file from disk after a job completes.
+        // Null on error/cancel (and unused by the CLI's JSON output).
+        std::shared_ptr<const AudioFile> audio;
+
         [[nodiscard]] bool ok() const noexcept { return errorMessage.isEmpty(); }
 
         /** Serialize to JSON suitable for tooling / CLI output. */

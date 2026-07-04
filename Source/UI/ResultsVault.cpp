@@ -232,13 +232,8 @@ namespace switchblade::ui
         }
     }
 
-    void ResultsVault::dropOneTile()
+    std::unique_ptr<ResultTile> ResultsVault::makeTile (const PendingSlice& ps)
     {
-        if (pending_.empty()) return;
-
-        auto ps = std::move (pending_.front());
-        pending_.pop_front();
-
         auto tile = std::make_unique<ResultTile> (
             fmt_, cache_,
             ps.file, ps.start, ps.end,
@@ -263,6 +258,17 @@ namespace switchblade::ui
 
         tile->setNormalized (normMode_);
         addAndMakeVisible (*tile);
+        return tile;
+    }
+
+    void ResultsVault::dropOneTile()
+    {
+        if (pending_.empty()) return;
+
+        auto ps = std::move (pending_.front());
+        pending_.pop_front();
+
+        auto tile = makeTile (ps);
         tile->triggerEntryGlow();
 
         // Hand the raw pointer to MainContainer BEFORE we move the unique_ptr
@@ -275,6 +281,109 @@ namespace switchblade::ui
 
         relayout();
         repaint();
+    }
+
+    //==========================================================================
+    //  In-place per-file update (marker edits)
+    //==========================================================================
+    void ResultsVault::updateSlicesForFile (
+        const AudioFilePtr& file,
+        const std::vector<switchblade::analysis::Transient>& transients,
+        switchblade::analysis::SourceClass classification,
+        juce::String noteName)
+    {
+        if (! file) return;
+
+        // Snapshot this file's tile run: insertion position, numbering, and
+        // which ordinals were multi-selected, so the replacements slot back
+        // into the same place with the same state.
+        std::size_t       insertPos = tiles_.size();
+        std::vector<int>  oldIndices;
+        std::vector<bool> selectedByOrdinal;
+        for (std::size_t i = 0; i < tiles_.size(); ++i)
+        {
+            if (tiles_[i] && tiles_[i]->file() == file)
+            {
+                if (oldIndices.empty())
+                    insertPos = i;
+                oldIndices.push_back (tiles_[i]->sliceIndex());
+                selectedByOrdinal.push_back (tiles_[i]->isMultiSelected());
+            }
+        }
+
+        std::erase_if (pending_, [&] (const PendingSlice& p) { return p.file == file; });
+        for (auto it = tiles_.begin(); it != tiles_.end(); )
+        {
+            if (*it && (*it)->file() == file)
+            {
+                removeChildComponent (it->get());
+                it = tiles_.erase (it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        const juce::int64 totalSamples =
+            static_cast<juce::int64> (file->samples.getNumSamples());
+        const bool pitched = switchblade::analysis::wantsPitch (classification);
+
+        std::vector<std::unique_ptr<ResultTile>> fresh;
+        fresh.reserve (transients.size());
+        for (std::size_t i = 0; i < transients.size(); ++i)
+        {
+            const juce::int64 start = transients[i].sampleIndex;
+            const juce::int64 end = (transients[i].naturalEnd > 0)
+                ? transients[i].naturalEnd
+                : ((i + 1 < transients.size())
+                    ? transients[i + 1].sampleIndex
+                    : totalSamples);
+            const juce::int64 endC = std::min (end, totalSamples);
+
+            juce::String thisNote = noteName;
+            if (pitched)
+            {
+                if (auto hz = switchblade::analysis::detectSlicePitchHz (*file, start, endC))
+                    thisNote = juce::String (
+                        switchblade::analysis::PitchDetector::noteNameFromHz (*hz));
+            }
+
+            // Reuse the removed run's numbering; markers the user ADDED get
+            // fresh global indices beyond it.
+            const int idx = (i < oldIndices.size())
+                ? oldIndices[i] : nextTileIndex_++;
+
+            auto tile = makeTile ({ file, start, endC,
+                                    classification, thisNote, idx });
+            if (i < selectedByOrdinal.size() && selectedByOrdinal[i])
+                tile->setMultiSelected (true);
+            tile->triggerEntryGlow();
+            fresh.push_back (std::move (tile));
+        }
+
+        // Collect raw pointers first — onTileLanded queues a background
+        // pre-render against the heap object, which is stable across the move.
+        std::vector<ResultTile*> raws;
+        raws.reserve (fresh.size());
+        for (auto& t : fresh) raws.push_back (t.get());
+
+        tiles_.insert (tiles_.begin() + static_cast<std::ptrdiff_t> (insertPos),
+                       std::make_move_iterator (fresh.begin()),
+                       std::make_move_iterator (fresh.end()));
+
+        if (onTileLanded)
+            for (auto* raw : raws)
+                onTileLanded (*raw);
+
+        relayout();
+        repaint();
+    }
+
+    void ResultsVault::setAllTilesSelected (bool selected)
+    {
+        for (auto& t : tiles_)
+            if (t) t->setMultiSelected (selected);   // no-ops when unchanged
     }
 
     //==========================================================================

@@ -3,7 +3,6 @@
 #include "Core/Palette.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <juce_opengl/juce_opengl.h>
 
 #include "BinaryData.h"
 
@@ -12,8 +11,13 @@
 //
 //  Responsibilities:
 //    1. Install the Neon-Deco LookAndFeel globally before any Components exist.
-//    2. Create a DocumentWindow and attach an OpenGLContext (for bloom/glass).
+//    2. Create the DocumentWindow hosting MainContainer.
 //    3. Tear everything down cleanly on quit.
+//
+//  Rendering is plain JUCE software compositing — the bloom/glass effects are
+//  painted per-component (see Palette / LookAndFeel). An OpenGL context was
+//  once attached here for a shader layer that never shipped; it forced GL
+//  compositing of the whole tree for zero visual benefit, so it was removed.
 // =============================================================================
 
 class SwitchbladeApp final : public juce::JUCEApplication
@@ -52,7 +56,7 @@ public:
 
 private:
     //==========================================================================
-    //  MainWindow — DocumentWindow that hosts MainContainer + OpenGL context.
+    //  MainWindow — DocumentWindow that hosts MainContainer.
     //==========================================================================
     class MainWindow final : public juce::DocumentWindow
     {
@@ -74,12 +78,6 @@ private:
             container_ = std::make_unique<switchblade::ui::MainContainer>();
             container_->initAudioDevice();
 
-            // OpenGL context — attaches to this window; renders on a background
-            // GL thread. Bloom and frosted-glass compositing happen here.
-            glContext_.setOpenGLVersionRequired (
-                juce::OpenGLContext::openGL3_2);
-            glContext_.attachTo (*this);
-
             setContentNonOwned (container_.get(), true);
             centreWithSize (1280, 800);
             setVisible (true);
@@ -91,11 +89,6 @@ private:
                 setIcon (icon);
         }
 
-        ~MainWindow() override
-        {
-            glContext_.detach();
-        }
-
         void closeButtonPressed() override
         {
             app_.systemRequestedQuit();
@@ -104,7 +97,6 @@ private:
     private:
         SwitchbladeApp&                                    app_;
         std::unique_ptr<switchblade::ui::MainContainer>    container_;
-        juce::OpenGLContext                                glContext_;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
     };

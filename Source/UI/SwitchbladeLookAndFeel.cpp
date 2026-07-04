@@ -78,9 +78,8 @@ namespace switchblade::ui
                                                    juce::Rectangle<float> bounds,
                                                    float cornerRadius) const
     {
-        // Placeholder: solid translucent tint. Real frosted effect is rendered
-        // via FrostedGlassPanel + NeonBloomShader on the GL layer; this CPU
-        // fallback keeps the aesthetic coherent when GL is unavailable.
+        // Translucent tint gradient — the app's frosted-glass look is painted
+        // per-component in software (no GL layer).
         juce::Path body;
         body.addRoundedRectangle (bounds, cornerRadius);
 

@@ -108,6 +108,9 @@ namespace switchblade::ui
             voiceBank_.trigger (std::move (file), start, end);
         }
 
+        /** Stop every active voice (keyboard Esc, panic). */
+        void stopAll() noexcept { voiceBank_.stopAll(); }
+
         /** Public audio source to wire into a device manager. */
         [[nodiscard]] juce::AudioSource& getAudioSource() noexcept { return voiceBank_; }
 

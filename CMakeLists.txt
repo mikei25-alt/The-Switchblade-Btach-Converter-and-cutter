@@ -67,9 +67,7 @@ target_compile_definitions(SwitchbladeCore PUBLIC
 # UI library — LookAndFeel, shaders, visual components
 # -----------------------------------------------------------------------------
 add_library(SwitchbladeUI STATIC
-    Source/UI/SwitchbladeLookAndFeel.cpp
-    Source/UI/FrostedGlassPanel.cpp
-    Source/UI/NeonBloomShader.cpp)
+    Source/UI/SwitchbladeLookAndFeel.cpp)
 
 target_include_directories(SwitchbladeUI PUBLIC Source)
 
@@ -77,7 +75,6 @@ target_link_libraries(SwitchbladeUI
     PUBLIC
         juce::juce_gui_extra
         juce::juce_audio_utils
-        juce::juce_opengl
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
 
@@ -115,8 +112,7 @@ target_sources(Switchblade PRIVATE
     Source/UI/ResultTile.cpp
     Source/UI/ResultsVault.cpp
     Source/UI/MainContainer.cpp
-    # SwitchbladeLookAndFeel, FrostedGlassPanel, NeonBloomShader
-    # are compiled via SwitchbladeUI static lib below
+    # SwitchbladeLookAndFeel is compiled via the SwitchbladeUI static lib
 )
 
 target_include_directories(Switchblade PRIVATE Source)
@@ -144,7 +140,6 @@ target_link_libraries(Switchblade
         juce::juce_gui_extra
         juce::juce_audio_utils
         juce::juce_audio_formats
-        juce::juce_opengl
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags

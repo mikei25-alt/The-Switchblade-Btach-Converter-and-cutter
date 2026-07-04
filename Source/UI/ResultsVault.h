@@ -65,6 +65,20 @@ namespace switchblade::ui
             pointer (returns 0). */
         int removeSlicesForFile (const AudioFilePtr& file);
 
+        /** Replace this file's tiles IN PLACE after a marker edit: its old
+            tiles are removed and fresh ones land instantly at the same spot,
+            reusing the old numbering and restoring the file's multi-selection
+            by ordinal. Every other tile is untouched — unlike clear() +
+            addSlices() this preserves selections, the ceremony bar, and skips
+            the arrival stagger (this is interactive feedback, not a batch). */
+        void updateSlicesForFile (const AudioFilePtr& file,
+                                  const std::vector<switchblade::analysis::Transient>& transients,
+                                  switchblade::analysis::SourceClass classification,
+                                  juce::String noteName = {});
+
+        /** Select or deselect every landed tile (keyboard Select All / Esc). */
+        void setAllTilesSelected (bool selected);
+
         /** Call once the engine signals all-complete.  Stamps a "N SAMPLES READY"
             badge and slides an "EXPORT COLLECTION" bar in from the bottom. */
         void triggerCompletionCeremony();
@@ -131,6 +145,9 @@ namespace switchblade::ui
         void timerCallback() override;
         void relayout();
         void dropOneTile();
+        /** Construct + wire + attach one tile (shared by the stagger drain
+            and updateSlicesForFile). Caller stores it and triggers the glow. */
+        [[nodiscard]] std::unique_ptr<ResultTile> makeTile (const PendingSlice& ps);
         [[nodiscard]] int tileW() const noexcept;
         [[nodiscard]] int computeHeight() const noexcept;
 

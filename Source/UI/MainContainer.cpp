@@ -443,7 +443,14 @@ namespace switchblade::ui
         for (int i = 0; i < static_cast<int> (kModeNames.size()); ++i)
             modeCombo_.addItem (kModeNames[static_cast<std::size_t> (i)], i + 1);
         modeCombo_.setSelectedId (1, juce::dontSendNotification);
-        modeCombo_.onChange = [this] { applyModeSliderConfig(); };
+        modeCombo_.onChange = [this]
+        {
+            applyModeSliderConfig();
+            // The mode applies to already-loaded cards too. Previously only
+            // Grid tweaks re-sliced live, so switching Auto -> Percussive
+            // silently left every existing card under the old mode.
+            reAnalyzeLoadedCards();
+        };
         addAndMakeVisible (modeCombo_);
 
         // Sensitivity slider — wired to engine params on every change
@@ -530,7 +537,7 @@ namespace switchblade::ui
         sensitivitySlider_.onDragEnd = [this]
         {
             if (sliderInGridMode_)
-                reAnalyzeGridCards();
+                reAnalyzeLoadedCards();
         };
 
         // Buttons
@@ -1215,15 +1222,16 @@ namespace switchblade::ui
             card->setTransients (std::move (ts));
 
             renderAndExportCard (*card);
-            rebuildVaultFromCards();
+            syncVaultForCard (*card);
         };
 
         card->onMarkerMoved = [this, card] (int, juce::int64)
         {
-            // Per spec: a marker drag must immediately re-render the
-            // corresponding slice in the result tiles. We finalise slice
-            // boundaries from the new marker positions on the same card,
-            // then rebuild the vault so the affected tiles update in place.
+            // Per spec: a marker edit must immediately re-render the
+            // corresponding slices in the result tiles. Boundaries are
+            // re-finalised from the new marker positions, then only THIS
+            // file's tiles are replaced — other tiles (and any multi-
+            // selection) survive untouched.
             if (card->file())
             {
                 auto ts = card->transients();
@@ -1231,7 +1239,7 @@ namespace switchblade::ui
                 card->setTransients (std::move (ts));
             }
             refreshPreviewGrid();
-            rebuildVaultFromCards();
+            syncVaultForCard (*card);
         };
 
         card->onPlayClicked = [this, card]
@@ -1573,7 +1581,79 @@ namespace switchblade::ui
                 requestDeleteCards (std::move (targets));
                 return true;
             }
+            return false;
         }
+
+        // Space — preview the highlighted card (replaces any playing voice).
+        if (k == juce::KeyPress (juce::KeyPress::spaceKey))
+        {
+            if (selectedCard_ != nullptr && selectedCard_->file())
+            {
+                const auto f = selectedCard_->file();
+                previewGrid_->playSlice (
+                    f, 0,
+                    static_cast<juce::int64> (f->samples.getNumSamples()),
+                    true);
+                return true;
+            }
+            return false;
+        }
+
+        // Esc — stop playback and clear every selection.
+        if (k == juce::KeyPress (juce::KeyPress::escapeKey))
+        {
+            previewGrid_->stopAll();
+            if (resultsVault_)
+                resultsVault_->setAllTilesSelected (false);
+            for (auto& c : cards_)
+                if (c) c->setMultiSelected (false);
+            updateSelectionCount();
+            return true;
+        }
+
+        // Cmd/Ctrl+A — arm every vault tile for Export Selection.
+        if (k.getKeyCode() == 'A' && k.getModifiers().isCommandDown())
+        {
+            if (resultsVault_ && resultsVault_->tileCount() > 0)
+            {
+                resultsVault_->setAllTilesSelected (true);
+                updateSelectionCount();
+                return true;
+            }
+            return false;
+        }
+
+        // Up / Down — walk the card list, keeping the selection in view.
+        if (k == juce::KeyPress (juce::KeyPress::upKey)
+            || k == juce::KeyPress (juce::KeyPress::downKey))
+        {
+            if (cards_.empty())
+                return false;
+
+            const int step = (k == juce::KeyPress (juce::KeyPress::downKey)) ? 1 : -1;
+            int idx = -1;
+            for (std::size_t i = 0; i < cards_.size(); ++i)
+                if (cards_[i].get() == selectedCard_) { idx = static_cast<int> (i); break; }
+
+            const int last = static_cast<int> (cards_.size()) - 1;
+            const int next = (idx < 0) ? (step > 0 ? 0 : last)
+                                       : juce::jlimit (0, last, idx + step);
+            auto* target = cards_[static_cast<std::size_t> (next)].get();
+            selectCard (target);
+
+            // Scroll the viewport just enough to reveal the new selection.
+            const auto b    = target->getBounds();       // in cardList_ coords
+            const auto view = cardViewport_.getViewArea();
+            if (b.getY() < view.getY())
+                cardViewport_.setViewPosition (
+                    0, juce::jmax (0, b.getY() - CardListComponent::kCardGap));
+            else if (b.getBottom() > view.getBottom())
+                cardViewport_.setViewPosition (
+                    0, b.getBottom() + CardListComponent::kCardGap
+                       - cardViewport_.getHeight());
+            return true;
+        }
+
         return false;
     }
 
@@ -1972,29 +2052,22 @@ namespace switchblade::ui
                                       juce::dontSendNotification);
     }
 
-    void MainContainer::rebuildVaultFromCards()
+    void MainContainer::syncVaultForCard (SampleCard& card)
     {
-        if (! resultsVault_) return;
+        if (! resultsVault_ || ! card.file()) return;
 
-        resultsVault_->clear();
-        for (const auto& card : cards_)
+        juce::String noteName;
+        if (wantsPitch (card.classification())
+            && card.pitchHz().has_value()
+            && card.pitchClarity().value_or (0.0f) > 0.5f)
         {
-            if (! card->file() || card->transients().empty()) continue;
-
-            juce::String noteName;
-            if (wantsPitch (card->classification())
-                && card->pitchHz().has_value()
-                && card->pitchClarity().value_or (0.0f) > 0.5f)
-            {
-                noteName = juce::String (
-                    switchblade::analysis::PitchDetector::noteNameFromHz (
-                        *card->pitchHz()));
-            }
-            resultsVault_->addSlices (card->file(), card->transients(),
-                                      card->classification(), noteName);
+            noteName = juce::String (
+                switchblade::analysis::PitchDetector::noteNameFromHz (
+                    *card.pitchHz()));
         }
-        // Selection set was cleared by clear(); refresh the counter so the
-        // top bar doesn't keep stale state.
+        resultsVault_->updateSlicesForFile (card.file(), card.transients(),
+                                            card.classification(), noteName);
+        // A replaced run may have carried selected tiles; keep the counter live.
         updateSelectionCount();
     }
 
@@ -2093,7 +2166,7 @@ namespace switchblade::ui
         }
 
         if (sliderInGridMode_)
-            reAnalyzeGridCards();
+            reAnalyzeLoadedCards();
     }
 
     void MainContainer::commitMaxSamplesField()
@@ -2112,13 +2185,14 @@ namespace switchblade::ui
         }
 
         if (sliderInGridMode_)
-            reAnalyzeGridCards();
+            reAnalyzeLoadedCards();
     }
 
-    void MainContainer::reAnalyzeGridCards()
+    void MainContainer::reAnalyzeLoadedCards()
     {
-        // Re-slice every loaded card under the current mode so a grid tweak
-        // (subdivision or BPM) takes effect on already-analysed files.
+        // Re-slice every loaded card under the current mode — mode-combo
+        // changes and Grid tweaks (subdivision / BPM / max samples) all take
+        // effect on already-analysed files.
         const auto mode = currentMode();
         for (const auto& c : cards_)
             if (c && c->file())

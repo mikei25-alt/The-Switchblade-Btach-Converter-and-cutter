@@ -314,9 +314,10 @@ namespace switchblade::ui
         void   commitMaxSamplesField();
         /** Show an auto-detected BPM in the field (no-op once user-overridden). */
         void   showDetectedBpm (double bpm);
-        /** Re-enqueue every loaded card under the current mode so a grid tweak
-            (subdivision or BPM) re-slices already-analysed files live. */
-        void   reAnalyzeGridCards();
+        /** Re-enqueue every loaded card under the current mode. Runs when the
+            mode combo changes and when a Grid tweak (subdivision, BPM, max
+            samples) needs already-analysed files re-sliced live. */
+        void   reAnalyzeLoadedCards();
 
         //----- Card deletion --------------------------------------------------
         /** Right-click on a card: show a PopupMenu with "Delete card" or
@@ -342,7 +343,9 @@ namespace switchblade::ui
                                std::optional<float> pitchHz = {}) const;
         void exportSelection();
         void updateSelectionCount();
-        void rebuildVaultFromCards();
+        /** Push one card's current transients into the vault in place —
+            selection and unrelated tiles survive (unlike a full rebuild). */
+        void syncVaultForCard (SampleCard& card);
         void refreshPreviewGrid();
         void setStatus (const juce::String& msg);
         [[nodiscard]] switchblade::analysis::AnalysisMode currentMode() const noexcept;

@@ -12,6 +12,10 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+    # Claude working branches build installers on push so packaged artifacts
+    # are available before merge (workflow_dispatch only works once this file
+    # reaches the default branch). Drop this after merging if undesired.
+    branches: ['claude/**']
 
 jobs:
   windows-installer:

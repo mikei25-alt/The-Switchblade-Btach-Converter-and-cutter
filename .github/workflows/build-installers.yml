@@ -1,0 +1,98 @@
+# =============================================================================
+#  Build installers — Windows setup .exe (Inno Setup) and macOS .dmg.
+#
+#  Runs on manual dispatch and on version tags (v*). Tag builds also attach
+#  the installers to a GitHub Release. Both binaries are UNSIGNED: Windows
+#  SmartScreen and macOS Gatekeeper will warn on first launch (macOS users:
+#  right-click the app -> Open the first time).
+# =============================================================================
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        run: git clone --depth 1 https://github.com/juce-framework/JUCE.git External/JUCE
+
+      - name: Configure
+        run: cmake -S . -B build -DSWITCHBLADE_TESTS=OFF
+
+      - name: Build app
+        run: cmake --build build --config Release --target Switchblade
+
+      - name: Generate installer icon from the logo
+        run: |
+          python -m pip install --quiet pillow
+          python -c "from PIL import Image; Image.open('Source/Assets/logo.png').save('installer/switchblade.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Build installer (Inno Setup)
+        run: iscc installer\windows.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TheSwitchblade-Windows-Setup
+          path: installer/output/*.exe
+          if-no-files-found: error
+
+  macos-installer:
+    name: macOS installer
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone JUCE
+        run: git clone --depth 1 https://github.com/juce-framework/JUCE.git External/JUCE
+
+      - name: Configure (universal binary)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DSWITCHBLADE_TESTS=OFF
+          -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build app
+        run: cmake --build build --target Switchblade
+
+      - name: Create DMG
+        run: |
+          mkdir dmg
+          cp -R "build/Switchblade_artefacts/Release/The Switchblade.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "The Switchblade" -srcfolder dmg -ov -format UDZO "TheSwitchblade-macOS.dmg"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TheSwitchblade-macOS
+          path: TheSwitchblade-macOS.dmg
+          if-no-files-found: error
+
+  release:
+    name: Attach installers to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows-installer, macos-installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Create release with installers
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

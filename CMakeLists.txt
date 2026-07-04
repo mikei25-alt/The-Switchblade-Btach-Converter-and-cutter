@@ -101,7 +101,11 @@ juce_add_gui_app(Switchblade
     PRODUCT_NAME    "The Switchblade"
     COMPANY_NAME    "Grain of Salt Audio"
     BUNDLE_ID       "com.grainofsalt.switchblade"
-    VERSION         "0.1.0")
+    VERSION         "0.1.0"
+    # App icon — juceaide converts the PNG into the platform icon formats
+    # (.ico resource on Windows, .icns in the macOS bundle).
+    ICON_BIG        "${CMAKE_SOURCE_DIR}/Source/Assets/logo.png"
+    ICON_SMALL      "${CMAKE_SOURCE_DIR}/Source/Assets/logo.png")
 
 target_compile_features(Switchblade PRIVATE cxx_std_20)
 

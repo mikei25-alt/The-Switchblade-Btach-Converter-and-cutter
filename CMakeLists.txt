@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 project(Switchblade
-    VERSION 0.1.0
+    VERSION 0.8.0
     DESCRIPTION "The Switchblade — intelligent batch one-shot extractor"
     LANGUAGES C CXX)   # C: googletest enables it in a subdirectory, which breaks
                        # Ninja generation unless the language exists at top level
@@ -101,7 +101,7 @@ juce_add_gui_app(Switchblade
     PRODUCT_NAME    "The Switchblade"
     COMPANY_NAME    "Grain of Salt Audio"
     BUNDLE_ID       "com.grainofsalt.switchblade"
-    VERSION         "0.1.0"
+    VERSION         "0.8.0"
     # App icon — juceaide converts the PNG into the platform icon formats
     # (.ico resource on Windows, .icns in the macOS bundle).
     ICON_BIG        "${CMAKE_SOURCE_DIR}/Source/Assets/logo.png"

@@ -1,203 +1,171 @@
 # Switchblade — User Guide
 
-**Version 0.4.0** · Art-Deco batch sample converter and intelligent slicer
+**Version 0.8.0** · Art-Deco batch sample converter and intelligent slicer
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Getting Started](#getting-started)
+2. [Installing](#installing)
 3. [The Production Line](#the-production-line)
-   - [The Aperture — Loading Files](#the-aperture--loading-files)
-   - [Sample Cards — Reviewing Your Queue](#sample-cards--reviewing-your-queue)
-   - [The Mechanism — Choosing a Mode](#the-mechanism--choosing-a-mode)
-   - [The Igniter — Running Analysis](#the-igniter--running-analysis)
-   - [The Vault — Exporting Results](#the-vault--exporting-results)
-4. [Analysis Modes](#analysis-modes)
-5. [Slice Naming](#slice-naming)
-6. [Settings Reference](#settings-reference)
-7. [Building from Source](#building-from-source)
-8. [Changelog](Changelog)
+   - [Loading Files](#loading-files)
+   - [Sample Cards](#sample-cards)
+   - [Choosing a Mode](#choosing-a-mode)
+   - [Grid Mode Controls](#grid-mode-controls)
+   - [Producing Slices](#producing-slices)
+   - [The Preview Grid](#the-preview-grid)
+   - [The Results Vault](#the-results-vault)
+4. [Editing Slice Markers](#editing-slice-markers)
+5. [Keyboard Shortcuts](#keyboard-shortcuts)
+6. [Slice Naming](#slice-naming)
+7. [Settings Reference](#settings-reference)
 
 ---
 
 ## Overview
 
-Switchblade is a desktop tool for producers who need to batch-convert audio files and automatically slice them into usable samples. Drop in a folder of loops, one-shots, or mixed material — Switchblade analyses each file, classifies it (Percussive / Melodic / Auto), slices it at musically meaningful boundaries, and exports named WAV slices ready for your sampler.
+Switchblade is a desktop tool for producers who need to batch-convert audio files and automatically slice them into usable samples. Drop in a folder of loops, one-shots, or mixed material — Switchblade analyses each file, classifies it, slices it at musically meaningful boundaries, and exports named 24-bit WAV slices ready for your sampler.
 
-The interface is styled after Art-Deco industrial machinery: brass frames, neon filaments, and heavy physical controls.
+The interface is styled after Art-Deco industrial machinery: chrome frames, neon filaments, and heavy physical controls.
+
+> **Modifier key:** everywhere this guide says **Cmd/Ctrl**, use **Cmd** on macOS and **Ctrl** on Windows/Linux.
 
 ---
 
-## Getting Started
+## Installing
 
-### Requirements
-- Windows 10 / 11 (64-bit)
-- Visual Studio 2019, 2022, or 2026 with **Desktop development with C++** workload
-- Internet connection for first build (fetches JUCE 8.0.6 and GoogleTest via CMake FetchContent)
+Prebuilt installers come from the **Build installers** GitHub Actions workflow (and are attached to GitHub Releases on version tags):
 
-### First Run (from source)
+- **Windows** — run `TheSwitchblade-…-Windows-Setup.exe`. The binary is unsigned, so SmartScreen will warn: *More info → Run anyway*.
+- **macOS** — open `TheSwitchblade-macOS.dmg` and drag the app to Applications. Unsigned: **right-click → Open** the first time to pass Gatekeeper.
 
-```
-git clone https://github.com/mikei25-alt/The-Switchblade-Btach-Converter-and-cutter.git
-cd The-Switchblade-Btach-Converter-and-cutter
-setup.bat
-```
-
-`setup.bat` will:
-1. Locate CMake (PATH or VS-bundled)
-2. Clone JUCE 8.0.6 into `External/JUCE`
-3. Configure the CMake build in `build/`
-4. Open the solution in Visual Studio
-
-Then press **Ctrl+Shift+B** (Build Solution), then **Ctrl+F5** (Start Without Debugging).
+To build from source instead, see [building.md](building.md).
 
 ---
 
 ## The Production Line
 
-Switchblade's UI follows a top-to-bottom production-line metaphor.
+### Loading Files
 
-### The Aperture — Loading Files
+Drag audio files — or entire folders, scanned recursively — anywhere onto the window. Before anything is loaded, the animated drop-zone panel shows what's accepted:
 
-The large circular panel at the top of the window is **The Aperture**. Drag audio files or folders directly onto it. The blades rotate open on hover and a ripple effect confirms a successful drop.
+**Supported formats:** WAV · AIFF · MP3 · FLAC · OGG (batch drops are capped at 500 files)
 
-**Supported formats:** WAV · AIFF · MP3 · FLAC · OGG
+Every dropped file immediately gets a card and is analysed in the background; the Produce button shows a live `ANALYZING… (N)` count.
 
-You can drop a single file, a multi-file selection, or an entire folder. Subfolders are scanned recursively.
+### Sample Cards
 
----
+Each loaded file is a card in the central scrolling strip:
 
-### Sample Cards — Reviewing Your Queue
-
-Each loaded file appears as a **Sample Card** in the central scrolling strip. Cards show:
-
-| Element | Meaning |
+| Element | Interaction |
 |---|---|
-| **Waveform** | "Neon Filament" waveform drawn in real time |
-| **Play button** | Glass jewel button — click to preview in-app |
-| **Duration / Format** | File metadata |
-| **Classification badge** | Set after analysis (Percussive / Melodic / Auto) |
+| **Play button** (green triangle) | Preview the whole file |
+| **Filename strip** | Drag from here to export the *source file* out to your DAW / file manager (grab-hand cursor) |
+| **Classification badge** (right) | Click to force a different analysis mode for *this file only* — also the retry button if analysis failed |
+| **Waveform** | Cmd/Ctrl+wheel zooms around the cursor; drag to pan when zoomed; the `N×` badge resets zoom |
+| **Gold markers** | Slice boundaries — drag to nudge (zero-crossing snapped), double-click to add/delete |
+| **Extract** | Export just this card's slices |
 
-Cards can be dismissed individually with the × button before analysis.
+Click a card to select it (cyan glow) — the preview grid follows the selection. **Cmd/Ctrl+click** toggles the gold multi-select used for bulk deletion. **Right-click** opens the context menu (delete, re-enable delete confirmation). Failed files show a crimson **ANALYSIS FAILED** card with the reason.
+
+### Choosing a Mode
+
+The mode combo in the top bar selects the slicing algorithm. Changing it re-analyses every loaded card immediately.
+
+| Mode | Best For |
+|---|---|
+| **Auto** | Mixed or unknown material — classifies each file and picks |
+| **Percussive** | Drums, one-shots, rhythmic content (spectral-flux onsets) |
+| **Melodic** | Note-based material — segments at pitch changes, names every slice |
+| **Texture** | Pads and atmospheres — fires where the spectrum settles |
+| **Grid** | Loops at a known/detectable tempo — musical subdivisions |
+
+The **SENS** slider tunes detection sensitivity (lower = stricter, fewer slices).
+
+### Grid Mode Controls
+
+In Grid mode the slider becomes the **subdivision** control (1/2 … 1/64, triplets included) and two fields appear:
+
+- **BPM field** — shows the detected tempo. Tempo precedence: a BPM in the filename (`Loop_128_Cmaj.wav`) → a number you type here → automatic detection. Clear it (or type `AUTO`) to return to auto-detect.
+- **MAX field** — `ALL` keeps one slice per subdivision; a number curates down to that many of the strongest, most *distinct* one-shots.
+
+Grid tweaks re-slice all loaded cards live.
+
+### Producing Slices
+
+- **Produce** — exports every slice from every card. If any vault tiles are armed (gold), it exports just those instead.
+- **Export Selection** — exports only the armed vault tiles.
+- **Right-click either button** — choose peak normalization (off / −1 / −3 / −6 dBFS). The current level shows on the buttons and as a `⊕` pill on cards/tiles.
+- **Source folder** — where files land: next to each source by default; click to pick a folder, right-click to reset.
+
+Exports run in the background with an `Exporting n/N` progress readout — the UI stays responsive.
+
+### The Preview Grid
+
+The 4×4 pad grid maps the first four slices of up to four loaded cards (one card per row). Click a pad or use the keys printed on it: `1 2 3 4` / `Q W E R` / `A S D F` / `Z X C V`. Up to 8 voices play polyphonically.
+
+### The Results Vault
+
+Every slice lands as a tile in the vault (staggered as analysis completes; the badge bar counts `N READY +M INCOMING`):
+
+- **Click** a tile to audition it; **double-click** to audition and select.
+- **Cmd/Ctrl+click** arms tiles (gold) for Export Selection — the `[N] ARMED` counter tracks them.
+- **Drag a tile out** into your DAW or file manager. Tiles are pre-rendered in the background, so the drag is instant; an armed multi-selection drags as a bundle.
+- **CLEAR** (badge bar) empties the vault after a confirm — the "Trash Compactor". Source cards stay.
+- When a batch finishes, the ceremony bar stamps `✦ N SAMPLES READY` with an **EXPORT COLLECTION** button.
+
+Deleting a card that produced vault slices asks what to do with them (with a rememberable choice — reversible from the card's right-click menu).
 
 ---
 
-### The Mechanism — Choosing a Mode
+## Editing Slice Markers
 
-The triple-throw lever to the right of the aperture selects the slicing algorithm:
+Detection is a starting point; every boundary is editable on the card:
 
-| Position | Mode | Best For |
-|---|---|---|
-| **Left** | **Percussive** | Drum loops, one-shots, rhythmic content — uses Spectral Flux onset detection |
-| **Centre** | **Auto** | Mixed or unknown material — classifies each file and picks the best algorithm |
-| **Right** | **Tonal** | Sustained notes, pads, melodic phrases — uses centroid stability analysis |
+| Action | Result |
+|---|---|
+| **Drag a gold marker** | Move the boundary (snaps to the nearest zero-crossing within ±5 ms) |
+| **Double-click empty waveform** | Add a marker there (also zero-snapped; 64-marker ceiling) |
+| **Double-click a marker** | Delete it |
 
----
-
-### The Igniter — Running Analysis
-
-The large circular **ENGAGE** plunger starts the analysis pipeline. Press it once all files are loaded and a mode is selected. A neon power-surge animation travels down toward the sample cards as each file is processed.
-
-Progress is shown per-card. You can add more files while analysis is running.
+Edits immediately re-render only that file's vault tiles — your tile selection elsewhere survives.
 
 ---
 
-### The Vault — Exporting Results
+## Keyboard Shortcuts
 
-Processed slices appear as small **gem cards** in The Vault at the bottom of the window. Each gem card shows:
-- Slice number and detected pitch (Melodic mode)
-- Duration
-- Confidence score
-
-**Exporting:** Click any gem card to hear the slice. Click **Export All** to write all slices to a folder you choose. The **Trash Compactor** lever clears the vault.
-
----
-
-## Analysis Modes
-
-### Percussive Mode
-
-Uses **Spectral Flux** onset detection:
-
-1. Audio is mixed to mono and split into 2048-sample frames (hop 512).
-2. Each frame is Hann-windowed and FFT'd.
-3. Half-wave rectified magnitude differences between consecutive frames form the **novelty curve**.
-4. An **Adaptive Threshold** (sliding-window median + MAD) gates the novelty curve.
-5. Local maxima above the threshold become slice candidates.
-6. A silence gate (-40 dBFS) removes false triggers in quiet passages.
-7. Each onset is snapped to the nearest zero-crossing (±5 ms search radius).
-
-**Density Guard** caps percussive slices at 8 per file (4/sec for files longer than 2 seconds), preventing over-slicing on dense loops.
-
-### Tonal / Melodic Mode
-
-Uses **TextureAnalyzer** centroid stability:
-
-1. Spectral centroid is computed per frame.
-2. A ring-buffer sliding std-dev measures centroid stability over a configurable window.
-3. Transitions from unstable → stable spectral content mark region boundaries.
-4. Each region is zero-crossing snapped.
-
-In Melodic mode, **PitchDetector** (YIN algorithm) estimates the fundamental frequency of each slice. The detected pitch is embedded in the output filename.
-
-### Auto Mode
-
-Runs a lightweight classifier on the first 2 seconds:
-
-- **Onset rate** is estimated from the novelty curve.
-- A **YIN pitch scan** over several frames returns the best clarity score.
-- Files with `pitchClarity > 0.40` **and** `onsetRate < 1.5 /s` are classified Melodic; all others are Percussive.
-- The appropriate algorithm is then applied.
+| Key | Action |
+|---|---|
+| `Space` | Preview the selected card (replaces any playing voice) |
+| `↑` / `↓` | Walk the card list (auto-scrolls into view) |
+| `Cmd/Ctrl+A` | Arm every vault tile for Export Selection |
+| `Esc` | Stop playback and clear all selections |
+| `Delete` / `Backspace` | Delete the selected (or multi-selected) card(s) |
+| `1-4` `QWER` `ASDF` `ZXCV` | Trigger preview-grid pads |
+| `Cmd/Ctrl+wheel` on a waveform | Zoom (plain wheel scrolls the list) |
 
 ---
 
 ## Slice Naming
 
-Output files follow this pattern:
-
 | Mode | Pattern | Example |
 |---|---|---|
-| Percussive / Tonal | `[stem]_[tag]_[index].wav` | `drums_perc_01.wav` |
-| Melodic (pitch detected) | `[stem]_[Note]_[index].wav` | `SerumLead_C#3_01.wav` |
+| Percussive / Texture | `[stem]_[tag]_[index].wav` | `drums_perc_001.wav` |
+| Melodic / Grid (pitched) | `[stem]_[Note±cents]_[index].wav` | `SerumLead_C#3+12c_001.wav` |
 
-`[stem]` is the source filename without extension. `[index]` is zero-padded to 2 digits.
+Each *slice* gets its own pitch estimate (not the file-wide pitch), the cents suffix is omitted when in tune, and pitched exports carry ACID root-note metadata plus a BWAV `bext` chunk recording the source file and offset.
 
 ---
 
 ## Settings Reference
 
-Settings are accessible via the gear icon in the top bar.
-
-| Setting | Default | Description |
-|---|---|---|
-| **Min Spacing** | 200 ms | Minimum gap between two consecutive onset candidates |
-| **Sensitivity** | 0.7 | Onset detection sensitivity (0.5 = strict, 2.0 = loose) |
-| **RMS Floor** | –40 dBFS | Silence gate threshold — onsets below this are rejected |
-| **Zero-Snap Radius** | 5 ms | Search radius for zero-crossing alignment |
-| **Stability Window** | 0.1 s | Centroid stability window (Tonal mode) |
-| **Stability Threshold** | 0.5 | Minimum stability score to mark a region start (Tonal mode) |
-| **Slice Count Ceiling** | 64 | Hard cap on output slices per file |
-
----
-
-## Building from Source
-
-See the full build guide on the [Building](Building) page.
-
-Quick start:
-
-```bash
-# Configure (once)
-setup.bat
-
-# Build GUI
-build_debug.bat
-
-# Build + run tests
-cmake --build build --target SwitchbladeTests --config Debug
-build\tests\Debug\SwitchbladeTests.exe
-```
-
-All 36 tests should pass in under 15 seconds on Debug/MSVC.
+| Setting | Where | Default | Description |
+|---|---|---|---|
+| Sensitivity | top bar | 1.0 | Onset detection sensitivity (0.3 strict … 1.3 loose) |
+| Subdivision | top bar (Grid) | 1/16 | Musical grid step, incl. triplet stops |
+| BPM | top bar (Grid) | AUTO | Manual tempo override |
+| Max samples | top bar (Grid) | ALL | Curate grid one-shots down to N distinct hits |
+| Normalization | right-click Produce / Export Selection | off | Peak-normalize exports to −1/−3/−6 dBFS |
+| Output folder | Source folder button | next to source | Click to choose; right-click to reset |
+| Slice Count Ceiling | fixed | 64 | Hard cap on markers per file |

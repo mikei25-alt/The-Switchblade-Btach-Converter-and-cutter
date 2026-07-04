@@ -7,7 +7,7 @@
 ; =============================================================================
 
 #define MyAppName      "The Switchblade"
-#define MyAppVersion   "0.1.0"
+#define MyAppVersion   "0.8.0"
 #define MyAppPublisher "Grain of Salt Audio"
 #define MyAppExeName   "The Switchblade.exe"
 #define MyBuildDir     "..\build\Switchblade_artefacts\Release"

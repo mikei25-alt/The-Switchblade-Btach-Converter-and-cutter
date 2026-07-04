@@ -1,6 +1,6 @@
 # Analysis Architecture
 
-This page describes the internal design of Switchblade's audio analysis pipeline as of v0.4.0.
+This page describes the internal design of Switchblade's audio analysis pipeline as of v0.8.0. The diagram below shows the three original paths; v0.6+ added two more that reuse the same building blocks: **Melodic** (NoteSegmenter — frame-wise YIN pitch-continuity segmentation with a transient-detector fallback) and **Grid** (TempoEstimator + GridSlicer — tempo-relative subdivision boundaries, one-shot trimming, and variety-based curation). Since v0.8.0 the AnalysisEngine also hands the loaded audio back with each result so the UI never re-reads files from disk.
 
 ---
 
@@ -142,7 +142,30 @@ Implements the **YIN** algorithm (de Cheveigné & Kawahara 2002) on a single fra
 4. Parabolic interpolation for sub-sample accuracy.
 5. `clarity = 1 − d'(τ_best)` — returned with the F0 estimate.
 
-Complexity: O(W²) per frame. For the auto-mode classifier only 4–8 frames are scanned; this is fast enough in practice. A future optimisation could replace with FFT-based autocorrelation (O(W log W)).
+**FFT acceleration (v0.8.0):** the difference function is computed as
+`d(τ) = P(τ) + Q(τ) − 2R(τ)`, where `P`/`Q` are prefix-sum segment energies and `R` is the
+autocorrelation from one zero-padded real-FFT round trip — O(W log W) instead of O(W·τmax).
+Float round-off is amplified by cancellation exactly at the dip (where `d ≈ 0`), so the three
+lags around the winner are recomputed with the exact double-precision sum before parabolic
+interpolation; the 24-note resolution sweep still resolves every case to the cent. Frames small
+enough that the direct loop is cheaper (< ~128k multiplies) skip the FFT. Measured: 100-frame
+scan 84 → 12 ms, worst-case 30 s file-wide scan ~1 s → 141 ms (Release).
+
+---
+
+## TempoEstimator
+
+**File:** `Source/Analysis/TempoEstimator.h`
+
+Drives Grid mode. Short-time energy novelty → 3-point Hann smoothing (keeps a fractional-frame
+beat period from splitting its autocorrelation peak across two lag bins — the classic 150 BPM
+half-tempo error) → mean removal → **overlap-normalised** autocorrelation over the BPM band
+(removes the inherent bias toward fast tempos) → selection with a log-Gaussian perceptual prior
+plus harmonic reinforcement (`+0.5·acf(2·lag)`) → an octave-disambiguation check: if the winner's
+half lag carries ≥ 45 % of its correlation, events repeat at the half period and the faster
+reading wins (calibrated against backbeat patterns: true-beat support measures ≥ 0.57, spurious
+doublings ≤ 0.20). Filename BPM (`Loop_128_….wav`) and the manual field take precedence over
+detection entirely.
 
 ---
 

@@ -29,7 +29,7 @@ public:
     //  JUCEApplication
     //==========================================================================
     const juce::String getApplicationName()    override { return "The Switchblade"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return "0.8.0"; }
     bool moreThanOneInstanceAllowed()          override { return false; }
 
     void initialise (const juce::String& /*commandLine*/) override
